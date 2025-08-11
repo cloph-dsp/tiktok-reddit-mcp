@@ -4,8 +4,10 @@ import time
 from datetime import datetime
 from os import getenv, makedirs, path, remove
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar, cast
+import yt_dlp
 import requests
 import praw  # type: ignore
+import os  # added for list_downloaded_videos
 from mcp.server.fastmcp import FastMCP
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -14,6 +16,19 @@ if TYPE_CHECKING:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Optional transcription support via faster-whisper (enabled with USE_WHISPER_TRANSCRIPTION=true)
+USE_WHISPER = getenv("USE_WHISPER_TRANSCRIPTION", "false").lower() in ("1", "true", "yes", "on")
+try:
+    if USE_WHISPER:
+        from faster_whisper import WhisperModel  # type: ignore
+        _whisper_models = {}
+    else:
+        WhisperModel = None  # type: ignore
+except Exception as _imp_err:  # pragma: no cover
+    logger.warning(f"Disabling whisper transcription (import error): {_imp_err}")
+    USE_WHISPER = False
+    WhisperModel = None  # type: ignore
 
 
 class RedditClientManager:
@@ -377,8 +392,6 @@ def reply_to_post(
         logger.error(f"Error replying to post {post_id}: {e}")
         raise RuntimeError(f"Failed to reply to post: {e}") from e
 
-TIKTOK_API_URL = "https://tiktok-download-video1.p.rapidapi.com/getVideo"
-
 @mcp.tool()
 def download_tiktok_video_and_post_to_reddit(
     tiktok_url: str,
@@ -388,113 +401,210 @@ def download_tiktok_video_and_post_to_reddit(
     nsfw: bool = False,
     spoiler: bool = False,
 ) -> Dict[str, Any]:
+    """(Deprecated) One-shot: download TikTok and post to Reddit. Use modular tools instead.
     """
-    Downloads a TikTok video, posts it to Reddit, and adds a comment with the original URL.
+    dl = download_tiktok_video(tiktok_url, download_folder=download_folder, keep=True)
+    try:
+        post = post_downloaded_video(
+            video_path=dl['video_path'],
+            subreddit=subreddit,
+            title=post_title,
+            thumbnail_path=dl.get('thumbnail_path'),
+            nsfw=nsfw,
+            spoiler=spoiler,
+            comment=f"Original link / link original: {dl['resolved_url']}",
+        )
+        return { 'download': dl, 'post': post }
+    finally:
+        # Do not delete here; user can manage lifecycle manually now.
+        pass
+
+@mcp.tool()
+def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
+    """Download a TikTok video (and thumbnail) using yt-dlp.
 
     Args:
-        tiktok_url: The URL of the TikTok video (short or long).
-        subreddit: The subreddit to post the video to.
-        post_title: The title for the Reddit post.
-        download_folder: The folder to download the video to. Defaults to "downloaded".
-        nsfw: Whether the submission should be marked NSFW (default: False).
-        spoiler: Whether the submission should be marked as a spoiler (default: False).
+        url: TikTok video URL (short or full)
+        download_folder: Destination folder
+        keep: If False, video will be deleted after returning path metadata
 
     Returns:
-        A dictionary with the Reddit post and comment information.
+        Dict with video_id, video_path, thumbnail_path (if exists)
     """
-    original_tiktok_url = tiktok_url
-    logger.info(f"Starting TikTok download for URL: {original_tiktok_url}")
-
-    # Step 1: Resolve short link if necessary
-    if "vm.tiktok.com" in original_tiktok_url or "vt.tiktok.com" in original_tiktok_url:
-        logger.info("Short link detected, resolving to full URL.")
-        try:
-            response = requests.head(original_tiktok_url, allow_redirects=True, timeout=10)
-            response.raise_for_status()
-            tiktok_url = response.url
-            logger.info(f"Resolved to full URL: {tiktok_url}")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to resolve short link: {e}")
-            raise RuntimeError(f"Failed to resolve short link: {e}") from e
-
-    # Create download folder if it doesn't exist
     if not path.exists(download_folder):
         makedirs(download_folder)
 
-    # Step 2: Download TikTok video
-    headers = {
-        "x-rapidapi-key": getenv("RAPIDAPI_KEY"),
-        "x-rapidapi-host": "tiktok-download-video1.p.rapidapi.com",
+    # Resolve short link
+    original_url = url
+    if any(host in url for host in ("vm.tiktok.com", "vt.tiktok.com")):
+        try:
+            head = requests.head(url, allow_redirects=True, timeout=10)
+            head.raise_for_status()
+            url = head.url
+        except Exception as e:
+            raise RuntimeError(f"Failed to resolve short TikTok link: {e}") from e
+
+    output_template = path.join(download_folder, '%(id)s.%(ext)s')
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'format': 'best[ext=mp4]/best',
+        'outtmpl': output_template,
+        'writethumbnail': True,
     }
-    querystring = {"url": tiktok_url, "hd": "1"}
+
     video_path = None
     thumbnail_path = None
-
+    video_id = None
     try:
-        response = requests.get(TIKTOK_API_URL, headers=headers, params=querystring)
-        response.raise_for_status()
-        video_data = response.json()
-
-        if "data" not in video_data or "play" not in video_data["data"]:
-            raise ValueError("Could not retrieve video download link from API.")
-
-        video_url = video_data["data"]["play"]
-        video_id = video_data["data"]["id"]
-        video_path = path.join(download_folder, f"{video_id}.mp4")
-
-        if "cover" in video_data["data"]:
-            thumbnail_url = video_data["data"]["cover"]
-            thumbnail_path = path.join(download_folder, f"{video_id}.jpg")
-            with requests.get(thumbnail_url, stream=True) as r:
-                r.raise_for_status()
-                with open(thumbnail_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-            logger.info(f"Thumbnail downloaded to: {thumbnail_path}")
-
-        logger.info(f"Got video download URL: {video_url}")
-        logger.info(f"Downloading video to: {video_path}")
-
-        with requests.get(video_url, stream=True) as r:
-            r.raise_for_status()
-            with open(video_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        logger.info("Video downloaded successfully.")
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error calling TikTok API: {e}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_id = info.get('id')
+            video_path = ydl.prepare_filename(info)
+            base_filename, _ = path.splitext(video_path)
+            for ext in ('.jpg', '.webp', '.png', '.image'):
+                pth = base_filename + ext
+                if path.exists(pth):
+                    thumbnail_path = pth
+                    break
+    except Exception as e:
         raise RuntimeError(f"Failed to download TikTok video: {e}") from e
 
-    # Step 3: Post to Reddit
-    try:
-        logger.info(f"Posting video to r/{subreddit}")
-        post_info = create_post(
-            subreddit=subreddit,
-            title=post_title,
-            video_path=video_path,
-            thumbnail_path=thumbnail_path,
-            nsfw=nsfw,
-            spoiler=spoiler,
-        )
+    result = {
+        'original_url': original_url,
+        'resolved_url': url,
+        'video_id': video_id,
+        'video_path': video_path,
+        'thumbnail_path': thumbnail_path,
+        'kept': keep,
+    }
 
-        post_id = post_info["metadata"]["id"]
-        logger.info(f"Reddit post created with ID: {post_id}")
-
-        # Step 4: Add a comment with the original link
-        comment_content = f"Original TikTok video: {original_tiktok_url}"
-        logger.info(f"Adding comment to post {post_id}")
-        comment_info = reply_to_post(post_id=post_id, content=comment_content)
-
-        return {
-            "reddit_post": post_info,
-            "reddit_comment": comment_info,
-        }
-    finally:
-        # Step 5: Delete the video and thumbnail files
-        if video_path and path.exists(video_path):
+    if not keep and video_path and path.exists(video_path):
+        try:
             remove(video_path)
-            logger.info(f"Deleted video file: {video_path}")
-        if thumbnail_path and path.exists(thumbnail_path):
-            remove(thumbnail_path)
-            logger.info(f"Deleted thumbnail file: {thumbnail_path}")
+            if thumbnail_path and path.exists(thumbnail_path):
+                remove(thumbnail_path)
+            result['kept'] = False
+        except Exception:
+            pass
+
+    return result
+
+@mcp.tool()
+def transcribe_video(video_path: str, model_size: str = "small") -> Dict[str, Any]:
+    """Transcribe a downloaded video using faster-whisper if enabled.
+
+    Args:
+        video_path: Path to local video file
+        model_size: Whisper model size (tiny, base, small, medium, large-v3)
+
+    Returns:
+        Dict with transcript and segments. If transcription disabled, returns message.
+    """
+    if not path.exists(video_path):
+        raise ValueError("Video path does not exist")
+
+    if not USE_WHISPER:
+        return { 'status': 'disabled', 'message': 'Whisper transcription disabled. Set USE_WHISPER_TRANSCRIPTION=true to enable.' }
+
+    try:
+        if model_size not in ("tiny", "base", "small", "medium", "large-v3"):
+            model_size = "small"
+        if model_size not in _whisper_models:
+            logger.info(f"Loading whisper model: {model_size}")
+            _whisper_models[model_size] = WhisperModel(model_size, compute_type="auto")
+        model = _whisper_models[model_size]
+        segments_iter, info = model.transcribe(video_path, beam_size=1)
+        segments = []
+        full_text_parts = []
+        for seg in segments_iter:
+            segments.append({
+                'id': seg.id,
+                'start': seg.start,
+                'end': seg.end,
+                'text': seg.text.strip(),
+            })
+            full_text_parts.append(seg.text.strip())
+        transcript = " ".join(full_text_parts)
+        return {
+            'status': 'success',
+            'language': info.language,
+            'duration': info.duration,
+            'segments': segments,
+            'transcript': transcript,
+        }
+    except Exception as e:
+        raise RuntimeError(f"Failed to transcribe video: {e}") from e
+
+@mcp.tool()
+@require_write_access
+def post_downloaded_video(
+    video_path: str,
+    subreddit: str,
+    title: str,
+    thumbnail_path: Optional[str] = None,
+    nsfw: bool = False,
+    spoiler: bool = False,
+    comment: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Post a previously downloaded video to Reddit and optional comment.
+
+    Args:
+        video_path: Local video file path
+        subreddit: Target subreddit
+        title: Post title
+        thumbnail_path: Optional thumbnail path
+        nsfw: Mark NSFW
+        spoiler: Mark spoiler
+        comment: Optional comment body
+
+    Returns:
+        Dict with post metadata (and comment if added)
+    """
+    if not path.exists(video_path):
+        raise ValueError("Video path does not exist")
+
+    post_info = create_post(
+        subreddit=subreddit,
+        title=title,
+        video_path=video_path,
+        thumbnail_path=thumbnail_path if thumbnail_path and path.exists(thumbnail_path) else None,
+        nsfw=nsfw,
+        spoiler=spoiler,
+    )
+    result = { 'post': post_info }
+    if comment:
+        post_id = post_info['metadata']['id']
+        reply = reply_to_post(post_id=post_id, content=comment)
+        result['comment'] = reply
+    return result
+
+@mcp.tool()
+def list_downloaded_videos(folder: str = "downloaded") -> Dict[str, Any]:
+    """List downloaded video files in a folder.
+
+    Returns list of videos with id (basename without extension), file path, thumbnail path and size.
+    """
+    if not path.exists(folder):
+        return { 'videos': [] }
+    videos: List[Dict[str, Any]] = []
+    try:
+        for fname in sorted(os.listdir(folder)):
+            if fname.lower().endswith(('.mp4', '.mov', '.mkv', '.webm')):
+                full = path.join(folder, fname)
+                base, _ = path.splitext(full)
+                thumb = None
+                for ext in ('.jpg', '.webp', '.png', '.image'):
+                    candidate = base + ext
+                    if path.exists(candidate):
+                        thumb = candidate
+                        break
+                videos.append({
+                    'id': path.basename(base),
+                    'file': full,
+                    'thumbnail': thumb,
+                    'size_bytes': path.getsize(full) if path.exists(full) else None,
+                })
+    except Exception as e:
+        return { 'videos': [], 'error': f'Failed to list videos: {e}' }
+    return { 'videos': videos }
