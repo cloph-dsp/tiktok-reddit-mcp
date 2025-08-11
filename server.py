@@ -756,7 +756,7 @@ def suggest_subreddits(
 
 # --- Server entrypoint ---
 if __name__ == "__main__":
-    import argparse, subprocess, sys, shutil
+    import argparse, subprocess, sys, shutil, os as _os
 
     parser = argparse.ArgumentParser(description="Run TikTok→Reddit MCP server")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8050)), help="Proxy HTTP port (mcpo)")
@@ -764,61 +764,35 @@ if __name__ == "__main__":
     parser.add_argument("--no-proxy", action="store_true", help="Run raw MCP server (stdio) without mcpo HTTP proxy")
     args = parser.parse_args()
 
-    # If we're in the child process launched by mcpo, just run the raw MCP server over stdio.
-    if os.getenv("MCPO_CHILD") == "1" or args.no_proxy:
+    # Child/raw mode: just run stdio MCP server
+    if args.no_proxy or os.getenv("MCPO_CHILD") == "1":
         logger.info("Starting raw MCP stdio server (read_only=%s)", RedditClientManager().is_read_only)
         try:
-            # Run with no args (stdio). fastmcp older versions ignore host/port.
             mcp.run()
         except TypeError:
-            # Fallback in case run requires explicit mode later.
             mcp.run()
         sys.exit(0)
 
-    # Parent process: launch mcpo proxy which will re-invoke this script with MCPO_CHILD=1
+    # Parent: launch mcpo with proper syntax: mcpo --host H --port P [--api-key K] -- python server.py --no-proxy
     api_key = os.getenv("MCPO_API_KEY")
-
-    def build_cmd(base: list[str]) -> list[str]:
-        cmd = base + ["serve", "server:mcp", "--port", str(args.port), "--host", args.host]
-        if api_key:
-            cmd += ["--api-key", api_key]
-        return cmd
-
-    # Candidate commands to try in order.
-    candidates: list[list[str]] = []
-
-    # 1. Prefer the installed console script if available (mcpo on PATH).
     mcpo_path = shutil.which("mcpo")
-    if mcpo_path:
-        candidates.append(build_cmd([mcpo_path]))
+    if not mcpo_path:
+        logger.error("mcpo console script not found on PATH. Install with: pip install mcpo")
+        sys.exit(1)
 
-    # 2. Try module invocation via known cli module name (some packages expose mcpo.cli)
-    candidates.append(build_cmd([sys.executable, "-m", "mcpo.cli"]))
+    server_script = _os.path.abspath(__file__)
+    server_cmd = [sys.executable, server_script, "--no-proxy"]
 
-    # 3. Last resort: python -m mcpo (may fail for packages without __main__).
-    candidates.append(build_cmd([sys.executable, "-m", "mcpo"]))
+    mcpo_cmd = [mcpo_path, "--host", args.host, "--port", str(args.port)]
+    if api_key:
+        mcpo_cmd += ["--api-key", api_key]
+    mcpo_cmd += ["--"] + server_cmd
 
+    logger.info("Launching mcpo proxy: %s", " ".join(mcpo_cmd))
+    # Mark child for clarity (not strictly needed because of --no-proxy flag)
     env = os.environ.copy()
     env["MCPO_CHILD"] = "1"
-
-    last_error: Optional[Exception] = None
-    for idx, cmd in enumerate(candidates, start=1):
-        logger.info("Attempting to launch mcpo proxy (option %d/%d): %s", idx, len(candidates), " ".join(cmd))
-        try:
-            subprocess.run(cmd, env=env, check=True)
-            last_error = None
-            break
-        except FileNotFoundError as e:
-            last_error = e
-            logger.warning("Command not found: %s", cmd[0])
-            continue
-        except subprocess.CalledProcessError as e:
-            last_error = e
-            # If the error looks like the __main__ issue, try next candidate.
-            logger.warning("mcpo invocation failed (code %s). Trying next option if available.", e.returncode)
-            continue
-    else:  # No break occurred
-        if isinstance(last_error, FileNotFoundError):
-            logger.error("mcpo not installed or not on PATH. Install with: pip install mcpo")
-        else:
-            logger.error("All mcpo launch methods failed. Last error: %s", last_error)
+    try:
+        subprocess.run(mcpo_cmd, env=env, check=True)
+    except subprocess.CalledProcessError as e:
+        logger.error("mcpo exited with code %s", e.returncode)
