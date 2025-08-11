@@ -10,6 +10,14 @@ import praw  # type: ignore
 import os
 from mcp.server.fastmcp import FastMCP
 
+# Load environment variables from .env if present
+try:
+    from dotenv import load_dotenv  # type: ignore
+    # Only load if variables not already in environment (override=False)
+    load_dotenv(dotenv_path=os.getenv("ENV_FILE", ".env"), override=False)
+except Exception as _e:  # pragma: no cover
+    logging.getLogger(__name__).warning(f"Could not load .env file: {_e}")
+
 F = TypeVar("F", bound=Callable[..., Any])
 if TYPE_CHECKING:
     pass
