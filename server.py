@@ -756,7 +756,7 @@ def suggest_subreddits(
 
 # --- Server entrypoint ---
 if __name__ == "__main__":
-    import argparse, subprocess, sys
+    import argparse, subprocess, sys, shutil
 
     parser = argparse.ArgumentParser(description="Run TikTok→Reddit MCP server")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8050)), help="Proxy HTTP port (mcpo)")
@@ -777,28 +777,48 @@ if __name__ == "__main__":
 
     # Parent process: launch mcpo proxy which will re-invoke this script with MCPO_CHILD=1
     api_key = os.getenv("MCPO_API_KEY")
-    mcpo_cmd = [
-        sys.executable,
-        "-m",
-        "mcpo",
-        "serve",
-        "server:mcp",
-        "--port",
-        str(args.port),
-    ]
-    # host flag (if supported by current mcpo); safe to include.
-    mcpo_cmd += ["--host", args.host]
-    if api_key:
-        mcpo_cmd += ["--api-key", api_key]
 
-    # Environment with recursion guard
+    def build_cmd(base: list[str]) -> list[str]:
+        cmd = base + ["serve", "server:mcp", "--port", str(args.port), "--host", args.host]
+        if api_key:
+            cmd += ["--api-key", api_key]
+        return cmd
+
+    # Candidate commands to try in order.
+    candidates: list[list[str]] = []
+
+    # 1. Prefer the installed console script if available (mcpo on PATH).
+    mcpo_path = shutil.which("mcpo")
+    if mcpo_path:
+        candidates.append(build_cmd([mcpo_path]))
+
+    # 2. Try module invocation via known cli module name (some packages expose mcpo.cli)
+    candidates.append(build_cmd([sys.executable, "-m", "mcpo.cli"]))
+
+    # 3. Last resort: python -m mcpo (may fail for packages without __main__).
+    candidates.append(build_cmd([sys.executable, "-m", "mcpo"]))
+
     env = os.environ.copy()
     env["MCPO_CHILD"] = "1"
 
-    logger.info("Launching mcpo proxy: %s", " ".join(mcpo_cmd))
-    try:
-        subprocess.run(mcpo_cmd, env=env, check=True)
-    except FileNotFoundError:
-        logger.error("mcpo not installed. Install with: pip install mcpo")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"mcpo exited with code {e.returncode}")
+    last_error: Optional[Exception] = None
+    for idx, cmd in enumerate(candidates, start=1):
+        logger.info("Attempting to launch mcpo proxy (option %d/%d): %s", idx, len(candidates), " ".join(cmd))
+        try:
+            subprocess.run(cmd, env=env, check=True)
+            last_error = None
+            break
+        except FileNotFoundError as e:
+            last_error = e
+            logger.warning("Command not found: %s", cmd[0])
+            continue
+        except subprocess.CalledProcessError as e:
+            last_error = e
+            # If the error looks like the __main__ issue, try next candidate.
+            logger.warning("mcpo invocation failed (code %s). Trying next option if available.", e.returncode)
+            continue
+    else:  # No break occurred
+        if isinstance(last_error, FileNotFoundError):
+            logger.error("mcpo not installed or not on PATH. Install with: pip install mcpo")
+        else:
+            logger.error("All mcpo launch methods failed. Last error: %s", last_error)
