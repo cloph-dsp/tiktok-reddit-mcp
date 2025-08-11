@@ -601,3 +601,147 @@ def post_downloaded_video(
         pass
     result['video_deleted'] = deleted
     return result
+
+@mcp.tool()
+def suggest_subreddits(
+    query: str,
+    limit_subreddits: int = 5,
+    posts_limit: int = 5,
+    time_filters: Optional[List[str]] = None,
+    post_sort: str = "top",  # 'top', 'hot', 'new'
+) -> Dict[str, Any]:
+    """Suggest relevant subreddits for a topic and show top post titles.
+
+    Finds candidate subreddits via search, ranks by subscriber count, then
+    for each selected subreddit retrieves sample post titles for TWO time ranges
+    (default: week & year) when using 'top', or a single retrieval for other sorts.
+
+    Args:
+        query: Topic / keywords to search for.
+        limit_subreddits: Max number of subreddits to return.
+        posts_limit: Max sample posts per subreddit per time frame (will be capped at 5 for LLM context consistency).
+        time_filters: List of two time filters (e.g. ['week','year']). Ignored for non-'top' sorts.
+        post_sort: Post sorting method ('top','hot','new').
+
+    Returns:
+        Dict containing ranked subreddit suggestions and sample titles, PLUS a compact
+        'llm_context' string explicitly summarizing each subreddit with subscriber counts
+        and exactly 10 titles (5 per time frame) suitable to feed directly to an LLM.
+    """
+    manager = RedditClientManager()
+    if not manager.client:
+        raise RuntimeError("Reddit client not initialized")
+
+    if not query or not isinstance(query, str):
+        raise ValueError("query is required")
+
+    post_sort = post_sort.lower().strip()
+    if post_sort not in ("top", "hot", "new"):
+        post_sort = "top"
+
+    if time_filters is None or not isinstance(time_filters, list) or len(time_filters) < 2:
+        time_filters = ["week", "year"]  # default two frames
+    # Normalize & validate time filters
+    valid_tf = {"hour", "day", "week", "month", "year", "all"}
+    cleaned_time_filters: List[str] = []
+    for tf in time_filters:
+        tf_l = str(tf).lower().strip()
+        if tf_l in valid_tf and tf_l not in cleaned_time_filters:
+            cleaned_time_filters.append(tf_l)
+        if len(cleaned_time_filters) == 2:
+            break
+    if len(cleaned_time_filters) < 2:
+        # pad with defaults ensuring two
+        for fallback in ["week", "year", "all"]:
+            if fallback not in cleaned_time_filters:
+                cleaned_time_filters.append(fallback)
+            if len(cleaned_time_filters) == 2:
+                break
+    time_filters = cleaned_time_filters
+
+    suggestions: List[Dict[str, Any]] = []
+
+    try:
+        # Fetch candidate subreddits via search
+        subreddits_iter = manager.client.subreddits.search(query, limit=50)
+        candidates: List[praw.models.Subreddit] = []
+        for sub in subreddits_iter:
+            try:
+                _ = sub.subscribers  # may raise for invalid subs
+                candidates.append(sub)
+            except Exception:
+                continue
+
+        # Rank by subscriber count (descending)
+        candidates.sort(key=lambda s: getattr(s, "subscribers", 0) or 0, reverse=True)
+        selected = candidates[:limit_subreddits]
+
+        for sub in selected:
+            sub_info: Dict[str, Any] = {
+                "name": sub.display_name,
+                "title": getattr(sub, "title", ""),
+                "subscribers": getattr(sub, "subscribers", None),
+                "over18": getattr(sub, "over18", None),
+                "public_description": getattr(sub, "public_description", "")[:300],
+                "url": f"https://reddit.com{sub.url}",
+                "sample_posts": {},
+            }
+            try:
+                if post_sort == "top":
+                    for tf in time_filters:  # two time frames
+                        titles: List[str] = []
+                        try:
+                            for p in sub.top(time_filter=tf, limit=posts_limit):
+                                titles.append(p.title)
+                        except Exception as e:
+                            titles.append(f"<error fetching posts: {e}>")
+                        sub_info["sample_posts"][f"top_{tf}"] = titles
+                elif post_sort == "hot":
+                    titles = [p.title for p in sub.hot(limit=posts_limit)]
+                    sub_info["sample_posts"]["hot"] = titles
+                else:  # new
+                    titles = [p.title for p in sub.new(limit=posts_limit)]
+                    sub_info["sample_posts"]["new"] = titles
+            except Exception as e:
+                sub_info["sample_posts"]["error"] = str(e)
+            suggestions.append(sub_info)
+
+    except Exception as e:
+        raise RuntimeError(f"Failed subreddit suggestion search: {e}") from e
+
+    # Build LLM-friendly compact context (always two time frames, 5 titles each if available)
+    llm_lines: List[str] = []
+    capped = 5  # enforce 5 per timeframe for LLM context
+    if post_sort == "top":
+        tf1, tf2 = time_filters[0], time_filters[1]
+        for idx, sub in enumerate(suggestions, start=1):
+            subs = sub.get("subscribers")
+            tf1_titles = sub["sample_posts"].get(f"top_{tf1}", [])[:capped]
+            tf2_titles = sub["sample_posts"].get(f"top_{tf2}", [])[:capped]
+            llm_lines.append(
+                f"{idx}. r/{sub['name']} (subs: {subs}) | top_{tf1}: "
+                + " | ".join(tf1_titles)
+                + " || top_{tf2}: "
+                + " | ".join(tf2_titles)
+            )
+    else:
+        # For hot/new only one list; still produce up to 10 by duplicating timeframe label
+        key = post_sort
+        for idx, sub in enumerate(suggestions, start=1):
+            titles = sub["sample_posts"].get(key, [])[:10]
+            llm_lines.append(f"{idx}. r/{sub['name']} (subs: {sub.get('subscribers')}) | {key}: " + " | ".join(titles))
+
+    llm_context_string = "\n".join(llm_lines)
+
+    return {
+        "query": query,
+        "post_sort": post_sort,
+        "time_filters_used": time_filters if post_sort == "top" else None,
+        "limit_subreddits": limit_subreddits,
+        "posts_limit_requested": posts_limit,
+        "posts_limit_used_per_timeframe": 5 if post_sort == "top" else min(10, posts_limit),
+        "suggestions": suggestions,
+        "llm_context": llm_context_string,
+        "llm_context_list": llm_lines,
+        "note": "llm_context includes subreddit, subscriber count, and 5 titles per each of two time frames (total 10). Adjust time_filters to change frames.",
+    }

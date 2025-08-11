@@ -3,7 +3,8 @@
 Minimal MCP server to:
 1. Download TikTok videos (short or full URL) via yt-dlp (no external API key)
 2. (Optional) Transcribe locally with faster‑whisper
-3. Post as native Reddit video with source comment
+3. (Optional) Suggest target subreddits & sample titles
+4. Post as native Reddit video with source comment
 
 ---
 ## Core Tools
@@ -11,9 +12,10 @@ Minimal MCP server to:
 |------|---------|
 | `download_tiktok_video` | Download video (thumbnail discarded) & resolve short links. |
 | `transcribe_video` | Local Whisper transcript (enable via env flag). |
+| `suggest_subreddits` | Rank candidate subreddits & return 5+5 top titles (two time frames) + LLM context. |
 | `post_downloaded_video` | Upload local video (by path or video_id) to Reddit; auto delete after posting. |
 
-Recommended flow: download → (transcribe) → post.
+Recommended flow: download → (transcribe) → (suggest_subreddits) → post.
 
 ---
 ## Requirements
@@ -44,6 +46,7 @@ python server.py --port 9001
 ```
 Docs: http://localhost:<port>/docs  (Authorize with `Bearer <MCPO_API_KEY>` if set.)
 
+
 ---
 
 ## Auto Comment Logic
@@ -63,7 +66,6 @@ Provide `comment` explicitly to override.
 - CPU fallback; force CPU via `CT2_FORCE_CPU=1`
 
 ---
-
 ## Troubleshooting
 | Issue | Fix |
 |-------|-----|
