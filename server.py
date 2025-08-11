@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar, 
 import yt_dlp
 import requests
 import praw  # type: ignore
-import os  # added for list_downloaded_videos
+import os
 from mcp.server.fastmcp import FastMCP
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -393,48 +393,20 @@ def reply_to_post(
         raise RuntimeError(f"Failed to reply to post: {e}") from e
 
 @mcp.tool()
-def download_tiktok_video_and_post_to_reddit(
-    tiktok_url: str,
-    subreddit: str,
-    post_title: str,
-    download_folder: str = "downloaded",
-    nsfw: bool = False,
-    spoiler: bool = False,
-) -> Dict[str, Any]:
-    """(Deprecated) One-shot: download TikTok and post to Reddit. Use modular tools instead.
-    """
-    dl = download_tiktok_video(tiktok_url, download_folder=download_folder, keep=True)
-    try:
-        post = post_downloaded_video(
-            video_path=dl['video_path'],
-            subreddit=subreddit,
-            title=post_title,
-            thumbnail_path=dl.get('thumbnail_path'),
-            nsfw=nsfw,
-            spoiler=spoiler,
-            comment=f"Original link / link original: {dl['resolved_url']}",
-        )
-        return { 'download': dl, 'post': post }
-    finally:
-        # Do not delete here; user can manage lifecycle manually now.
-        pass
-
-@mcp.tool()
 def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
-    """Download a TikTok video (and thumbnail) using yt-dlp.
+    """Download a TikTok video using yt-dlp (thumbnail discarded immediately).
 
     Args:
         url: TikTok video URL (short or full)
         download_folder: Destination folder
-        keep: If False, video will be deleted after returning path metadata
+        keep: If False, video will be deleted after returning metadata
 
     Returns:
-        Dict with video_id, video_path, thumbnail_path (if exists)
+        Dict with video_id, video_path (may be deleted later), thumbnail_deleted flag
     """
     if not path.exists(download_folder):
         makedirs(download_folder)
 
-    # Resolve short link
     original_url = url
     if any(host in url for host in ("vm.tiktok.com", "vt.tiktok.com")):
         try:
@@ -454,18 +426,23 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
     }
 
     video_path = None
-    thumbnail_path = None
     video_id = None
+    thumbnail_deleted = False
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             video_id = info.get('id')
             video_path = ydl.prepare_filename(info)
             base_filename, _ = path.splitext(video_path)
+            # Locate and immediately delete thumbnail (not retained)
             for ext in ('.jpg', '.webp', '.png', '.image'):
                 pth = base_filename + ext
                 if path.exists(pth):
-                    thumbnail_path = pth
+                    try:
+                        remove(pth)
+                        thumbnail_deleted = True
+                    except Exception:
+                        pass
                     break
     except Exception as e:
         raise RuntimeError(f"Failed to download TikTok video: {e}") from e
@@ -475,19 +452,16 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
         'resolved_url': url,
         'video_id': video_id,
         'video_path': video_path,
-        'thumbnail_path': thumbnail_path,
+        'thumbnail_deleted': thumbnail_deleted,
         'kept': keep,
     }
 
     if not keep and video_path and path.exists(video_path):
         try:
             remove(video_path)
-            if thumbnail_path and path.exists(thumbnail_path):
-                remove(thumbnail_path)
             result['kept'] = False
         except Exception:
             pass
-
     return result
 
 @mcp.tool()
@@ -539,30 +513,61 @@ def transcribe_video(video_path: str, model_size: str = "small") -> Dict[str, An
 @mcp.tool()
 @require_write_access
 def post_downloaded_video(
-    video_path: str,
-    subreddit: str,
-    title: str,
+    video_path: Optional[str] = None,
+    subreddit: str = "",
+    title: str = "",
     thumbnail_path: Optional[str] = None,
     nsfw: bool = False,
     spoiler: bool = False,
     comment: Optional[str] = None,
+    original_url: Optional[str] = None,
+    comment_language: str = "both",  # 'en', 'pt', 'both'
+    auto_comment: bool = True,
+    video_id: Optional[str] = None,
+    download_folder: str = "downloaded",
 ) -> Dict[str, Any]:
-    """Post a previously downloaded video to Reddit and optional comment.
+    """Post a previously downloaded video to Reddit, then auto-delete video & thumbnail.
 
-    Args:
-        video_path: Local video file path
-        subreddit: Target subreddit
-        title: Post title
-        thumbnail_path: Optional thumbnail path
-        nsfw: Mark NSFW
-        spoiler: Mark spoiler
-        comment: Optional comment body
+    You can supply either:
+      - video_path (full path), OR
+      - video_id (basename without extension) + optional download_folder
 
-    Returns:
-        Dict with post metadata (and comment if added)
+    If neither is given, raises ValueError.
+
+    Auto comment generation (when comment not provided and original_url present):
+      en   -> "Original link: <url>"
+      pt   -> "Link original: <url>"
+      both -> "Original link / link original: <url>"
     """
+    # Resolve video path from id if needed
+    if not video_path:
+        if not video_id:
+            raise ValueError("Provide either video_path or video_id")
+        # search for supported extensions
+        for ext in ('.mp4', '.mov', '.mkv', '.webm'):
+            candidate = path.join(download_folder, f"{video_id}{ext}")
+            if path.exists(candidate):
+                video_path = candidate
+                break
+        if not video_path or not path.exists(video_path):
+            raise ValueError(f"Could not locate video for id {video_id} in '{download_folder}'")
+
     if not path.exists(video_path):
         raise ValueError("Video path does not exist")
+
+    lang = comment_language.lower().strip()
+    if lang not in ("en", "pt", "both"):
+        lang = "both"
+
+    auto_generated = False
+    if not comment and auto_comment and original_url:
+        if lang == "en":
+            comment = f"Original link: {original_url}"
+        elif lang == "pt":
+            comment = f"Link original: {original_url}"
+        else:
+            comment = f"Original link / link original: {original_url}"
+        auto_generated = True
 
     post_info = create_post(
         subreddit=subreddit,
@@ -572,39 +577,27 @@ def post_downloaded_video(
         nsfw=nsfw,
         spoiler=spoiler,
     )
-    result = { 'post': post_info }
+    result: Dict[str, Any] = { 'post': post_info, 'used_video_path': video_path }
     if comment:
         post_id = post_info['metadata']['id']
         reply = reply_to_post(post_id=post_id, content=comment)
         result['comment'] = reply
-    return result
+        result['comment_language'] = lang
+        result['auto_comment_generated'] = auto_generated
+    else:
+        result['comment_language'] = None
+        result['auto_comment_generated'] = False
 
-@mcp.tool()
-def list_downloaded_videos(folder: str = "downloaded") -> Dict[str, Any]:
-    """List downloaded video files in a folder.
-
-    Returns list of videos with id (basename without extension), file path, thumbnail path and size.
-    """
-    if not path.exists(folder):
-        return { 'videos': [] }
-    videos: List[Dict[str, Any]] = []
+    # Attempt deletion after successful post/comment
+    deleted = False
     try:
-        for fname in sorted(os.listdir(folder)):
-            if fname.lower().endswith(('.mp4', '.mov', '.mkv', '.webm')):
-                full = path.join(folder, fname)
-                base, _ = path.splitext(full)
-                thumb = None
-                for ext in ('.jpg', '.webp', '.png', '.image'):
-                    candidate = base + ext
-                    if path.exists(candidate):
-                        thumb = candidate
-                        break
-                videos.append({
-                    'id': path.basename(base),
-                    'file': full,
-                    'thumbnail': thumb,
-                    'size_bytes': path.getsize(full) if path.exists(full) else None,
-                })
-    except Exception as e:
-        return { 'videos': [], 'error': f'Failed to list videos: {e}' }
-    return { 'videos': videos }
+        if path.exists(video_path):
+            remove(video_path)
+            deleted = True
+        if thumbnail_path and path.exists(thumbnail_path):
+            try: remove(thumbnail_path)
+            except Exception: pass
+    except Exception:
+        pass
+    result['video_deleted'] = deleted
+    return result
