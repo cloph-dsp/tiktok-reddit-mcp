@@ -1,0 +1,17 @@
+[project]
+name = "tiktok-reddit-mcp"
+version = "0.1.0"
+description = "A MCP server to download TikTok videos and post them to Reddit."
+authors = ["GitHub Copilot"]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "praw",
+    "fastmcp",
+    "requests",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
