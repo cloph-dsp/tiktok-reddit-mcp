@@ -770,5 +770,13 @@ if __name__ == "__main__":
         args.port,
         RedditClientManager().is_read_only,
     )
-    # Run FastMCP HTTP server (blocks)
-    mcp.run(host=args.host, port=args.port)
+    # Run FastMCP HTTP server (blocks). Some versions don't accept host; try port only.
+    try:
+        mcp.run(host=args.host, port=args.port)  # preferred (newer fastmcp)
+    except TypeError:
+        logger.warning("fastmcp.run() rejected host kwarg; retrying with port only")
+        try:
+            mcp.run(port=args.port)
+        except TypeError:
+            logger.warning("fastmcp.run() rejected port kwarg; falling back to no-arg run()")
+            mcp.run()
