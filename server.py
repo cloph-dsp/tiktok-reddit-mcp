@@ -753,3 +753,22 @@ def suggest_subreddits(
         "llm_context_list": llm_lines,
         "note": "llm_context includes subreddit, subscriber count, and 5 titles per each of two time frames (total 10). Adjust time_filters to change frames.",
     }
+
+# --- Server entrypoint ---
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run TikTok→Reddit MCP server")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8050)), help="Port to bind (default 8050)")
+    parser.add_argument("--host", type=str, default=os.getenv("HOST", "0.0.0.0"), help="Host/IP to bind (default 0.0.0.0)")
+    args = parser.parse_args()
+
+    logger.info(
+        "Starting MCP server '%s' on %s:%d (read_only=%s)",
+        mcp.name,
+        args.host,
+        args.port,
+        RedditClientManager().is_read_only,
+    )
+    # Run FastMCP HTTP server (blocks)
+    mcp.run(host=args.host, port=args.port)
