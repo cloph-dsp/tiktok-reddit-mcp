@@ -756,27 +756,49 @@ def suggest_subreddits(
 
 # --- Server entrypoint ---
 if __name__ == "__main__":
-    import argparse
+    import argparse, subprocess, sys
 
     parser = argparse.ArgumentParser(description="Run TikTok→Reddit MCP server")
-    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8050)), help="Port to bind (default 8050)")
-    parser.add_argument("--host", type=str, default=os.getenv("HOST", "0.0.0.0"), help="Host/IP to bind (default 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8050)), help="Proxy HTTP port (mcpo)")
+    parser.add_argument("--host", type=str, default=os.getenv("HOST", "0.0.0.0"), help="Proxy host (mcpo)")
+    parser.add_argument("--no-proxy", action="store_true", help="Run raw MCP server (stdio) without mcpo HTTP proxy")
     args = parser.parse_args()
 
-    logger.info(
-        "Starting MCP server '%s' on %s:%d (read_only=%s)",
-        mcp.name,
-        args.host,
-        args.port,
-        RedditClientManager().is_read_only,
-    )
-    # Run FastMCP HTTP server (blocks). Some versions don't accept host; try port only.
-    try:
-        mcp.run(host=args.host, port=args.port)  # preferred (newer fastmcp)
-    except TypeError:
-        logger.warning("fastmcp.run() rejected host kwarg; retrying with port only")
+    # If we're in the child process launched by mcpo, just run the raw MCP server over stdio.
+    if os.getenv("MCPO_CHILD") == "1" or args.no_proxy:
+        logger.info("Starting raw MCP stdio server (read_only=%s)", RedditClientManager().is_read_only)
         try:
-            mcp.run(port=args.port)
-        except TypeError:
-            logger.warning("fastmcp.run() rejected port kwarg; falling back to no-arg run()")
+            # Run with no args (stdio). fastmcp older versions ignore host/port.
             mcp.run()
+        except TypeError:
+            # Fallback in case run requires explicit mode later.
+            mcp.run()
+        sys.exit(0)
+
+    # Parent process: launch mcpo proxy which will re-invoke this script with MCPO_CHILD=1
+    api_key = os.getenv("MCPO_API_KEY")
+    mcpo_cmd = [
+        sys.executable,
+        "-m",
+        "mcpo",
+        "serve",
+        "server:mcp",
+        "--port",
+        str(args.port),
+    ]
+    # host flag (if supported by current mcpo); safe to include.
+    mcpo_cmd += ["--host", args.host]
+    if api_key:
+        mcpo_cmd += ["--api-key", api_key]
+
+    # Environment with recursion guard
+    env = os.environ.copy()
+    env["MCPO_CHILD"] = "1"
+
+    logger.info("Launching mcpo proxy: %s", " ".join(mcpo_cmd))
+    try:
+        subprocess.run(mcpo_cmd, env=env, check=True)
+    except FileNotFoundError:
+        logger.error("mcpo not installed. Install with: pip install mcpo")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"mcpo exited with code {e.returncode}")
