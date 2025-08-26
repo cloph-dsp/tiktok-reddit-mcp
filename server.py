@@ -511,6 +511,9 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
             result['kept'] = False
         except Exception:
             pass
+    
+    # Log completion message for LLM to monitor
+    logger.info(f"Download completed successfully. Video ID: {video_id}")
     return result
 
 @mcp.tool()
