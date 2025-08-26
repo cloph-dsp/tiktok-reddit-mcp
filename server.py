@@ -227,6 +227,8 @@ def create_post(
     thumbnail_path: Optional[str] = None,
     nsfw: bool = False,
     spoiler: bool = False,
+    flair_id: Optional[str] = None,
+    flair_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new post in a subreddit.
 
@@ -277,6 +279,8 @@ def create_post(
                     nsfw=nsfw,
                     spoiler=spoiler,
                     send_replies=True,
+                    flair_id=flair_id,
+                    flair_text=flair_text,
                 )
             elif is_self:
                 submission = subreddit_obj.submit(
@@ -296,6 +300,14 @@ def create_post(
                     spoiler=spoiler,
                     send_replies=True,
                 )
+            
+            # Apply flair if provided for self-posts or link posts
+            if (flair_id or flair_text) and not video_path:
+                try:
+                    submission.mod.flair(flair_template_id=flair_id, text=flair_text)
+                    logger.info(f"Applied flair to post {submission.id}: ID={flair_id}, Text='{flair_text}'")
+                except Exception as flair_error:
+                    logger.warning(f"Failed to apply flair to post {submission.id}: {flair_error}")
 
             logger.info(f"Post created successfully: {submission.permalink}")
 
@@ -312,11 +324,11 @@ def create_post(
 
         except Exception as post_error:
             logger.error(f"Failed to create post in r/{clean_subreddit}: {post_error}")
-            raise RuntimeError(f"Failed to create post: {post_error}") from post_error
+            raise RuntimeError(f"Failed to create post: {post_error}. Please check subreddit name, title, and content.") from post_error
 
     except Exception as e:
-        logger.error(f"Error in create_post for r/{clean_subreddit}: {e}")
-        raise RuntimeError(f"Failed to create post: {e}") from e
+        logger.error(f"An unexpected error occurred during post creation for r/{clean_subreddit}: {e}")
+        raise RuntimeError(f"An unexpected error occurred during post creation: {e}") from e
 
 
 @require_write_access
@@ -394,12 +406,12 @@ def reply_to_post(
             }
 
         except Exception as reply_error:
-            logger.error(f"Failed to create reply: {reply_error}")
-            raise RuntimeError(f"Failed to create reply: {reply_error}") from reply_error
+            logger.error(f"Failed to create reply to post {clean_post_id}: {reply_error}")
+            raise RuntimeError(f"Failed to create reply: {reply_error}. Please check content and permissions.") from reply_error
 
     except Exception as e:
-        logger.error(f"Error replying to post {post_id}: {e}")
-        raise RuntimeError(f"Failed to reply to post: {e}") from e
+        logger.error(f"An unexpected error occurred while replying to post {post_id}: {e}")
+        raise RuntimeError(f"An unexpected error occurred while replying to post: {e}") from e
 
 @mcp.tool()
 def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
@@ -605,6 +617,7 @@ def transcribe_video(video_path: str, model_size: str = "small") -> Dict[str, An
             })
             full_text_parts.append(seg.text.strip())
         transcript = " ".join(full_text_parts)
+        logger.info(f"Video transcription completed successfully. Language: {info.language}, Duration: {info.duration:.2f} seconds.")
         return {
             'status': 'success',
             'language': info.language,
@@ -613,6 +626,7 @@ def transcribe_video(video_path: str, model_size: str = "small") -> Dict[str, An
             'transcript': transcript,
         }
     except Exception as e:
+        logger.error(f"Failed to transcribe video: {e}")
         raise RuntimeError(f"Failed to transcribe video: {e}") from e
 
 @mcp.tool()
@@ -624,6 +638,8 @@ def post_downloaded_video(
     thumbnail_path: Optional[str] = None,
     nsfw: bool = False,
     spoiler: bool = False,
+    flair_id: Optional[str] = None,
+    flair_text: Optional[str] = None,
     comment: Optional[str] = None,
     original_url: Optional[str] = None,
     comment_language: str = "both",  # 'en', 'pt', 'both'
@@ -681,6 +697,8 @@ def post_downloaded_video(
         thumbnail_path=thumbnail_path if thumbnail_path and path.exists(thumbnail_path) else None,
         nsfw=nsfw,
         spoiler=spoiler,
+        flair_id=flair_id,
+        flair_text=flair_text,
     )
     result: Dict[str, Any] = { 'post': post_info, 'used_video_path': video_path }
     if comment:
@@ -702,9 +720,11 @@ def post_downloaded_video(
         if thumbnail_path and path.exists(thumbnail_path):
             try: remove(thumbnail_path)
             except Exception: pass
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to delete video or thumbnail after posting: {e}")
         pass
-    result['video_deleted'] = deleted
+    
+    logger.info(f"Video posted successfully to Reddit. Permalink: {post_info['metadata']['permalink']}")
     return result
 
 @mcp.tool()
@@ -790,8 +810,36 @@ def suggest_subreddits(
                 "public_description": getattr(sub, "public_description", "")[:300],
                 "url": f"https://reddit.com{sub.url}",
                 "sample_posts": {},
+                "flair_info": [],
+                "rules_info": [],
+                "video_post_allowed": True, # Assume allowed unless rule says otherwise
             }
             try:
+                # Fetch flair templates
+                flair_templates = []
+                for template in sub.flair.templates:
+                    flair_templates.append({
+                        "id": template.id,
+                        "text": template.text,
+                        "text_editable": template.text_editable,
+                        "type": template.type,
+                    })
+                sub_info["flair_info"] = flair_templates
+
+                # Fetch rules and check for video restrictions
+                rules = []
+                for rule in sub.rules:
+                    rules.append({
+                        "short_name": rule.short_name,
+                        "description": rule.description,
+                    })
+                    # Simple keyword matching for video restrictions
+                    if "video" in rule.short_name.lower() or "video" in rule.description.lower():
+                        if "no video" in rule.short_name.lower() or "no video" in rule.description.lower() or \
+                           "images only" in rule.short_name.lower() or "images only" in rule.description.lower():
+                            sub_info["video_post_allowed"] = False
+                sub_info["rules_info"] = rules
+
                 if post_sort == "top":
                     for tf in time_filters:  # two time frames
                         titles: List[str] = []
@@ -809,32 +857,39 @@ def suggest_subreddits(
                     sub_info["sample_posts"]["new"] = titles
             except Exception as e:
                 sub_info["sample_posts"]["error"] = str(e)
+                logger.warning(f"Error fetching subreddit details for r/{sub.display_name}: {e}")
             suggestions.append(sub_info)
 
     except Exception as e:
+        logger.error(f"Failed subreddit suggestion search: {e}")
         raise RuntimeError(f"Failed subreddit suggestion search: {e}") from e
 
     # Build LLM-friendly compact context (always two time frames, 5 titles each if available)
     llm_lines: List[str] = []
     capped = 5  # enforce 5 per timeframe for LLM context
-    if post_sort == "top":
-        tf1, tf2 = time_filters[0], time_filters[1]
-        for idx, sub in enumerate(suggestions, start=1):
-            subs = sub.get("subscribers")
+    for idx, sub in enumerate(suggestions, start=1):
+        subs = sub.get("subscribers")
+        flair_info = ", ".join([f"'{f['text']}' (editable: {f['text_editable']})" for f in sub['flair_info']]) if sub['flair_info'] else "None"
+        rules_summary = "; ".join([f"'{r['short_name']}'" for r in sub['rules_info']]) if sub['rules_info'] else "None"
+        video_allowed_status = "Allowed" if sub['video_post_allowed'] else "Not Allowed"
+
+        if post_sort == "top":
+            tf1, tf2 = time_filters[0], time_filters[1]
             tf1_titles = sub["sample_posts"].get(f"top_{tf1}", [])[:capped]
             tf2_titles = sub["sample_posts"].get(f"top_{tf2}", [])[:capped]
             llm_lines.append(
-                f"{idx}. r/{sub['name']} (subs: {subs}) | top_{tf1}: "
+                f"{idx}. r/{sub['name']} (subs: {subs}) | Video Posts: {video_allowed_status} | Flair: [{flair_info}] | Rules: [{rules_summary}] | top_{tf1}: "
                 + " | ".join(tf1_titles)
                 + " || top_{tf2}: "
                 + " | ".join(tf2_titles)
             )
-    else:
-        # For hot/new only one list; still produce up to 10 by duplicating timeframe label
-        key = post_sort
-        for idx, sub in enumerate(suggestions, start=1):
+        else:
+            key = post_sort
             titles = sub["sample_posts"].get(key, [])[:10]
-            llm_lines.append(f"{idx}. r/{sub['name']} (subs: {sub.get('subscribers')}) | {key}: " + " | ".join(titles))
+            llm_lines.append(
+                f"{idx}. r/{sub['name']} (subs: {subs}) | Video Posts: {video_allowed_status} | Flair: [{flair_info}] | Rules: [{rules_summary}] | {key}: "
+                + " | ".join(titles)
+            )
 
     llm_context_string = "\n".join(llm_lines)
 
@@ -848,7 +903,7 @@ def suggest_subreddits(
         "suggestions": suggestions,
         "llm_context": llm_context_string,
         "llm_context_list": llm_lines,
-        "note": "llm_context includes subreddit, subscriber count, and 5 titles per each of two time frames (total 10). Adjust time_filters to change frames.",
+        "note": "llm_context includes subreddit, subscriber count, video post allowance, flair info, rules summary, and 5 titles per each of two time frames (total 10). Adjust time_filters to change frames.",
     }
 
 # --- Server entrypoint ---
