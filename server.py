@@ -415,6 +415,46 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
     if not path.exists(download_folder):
         makedirs(download_folder)
 
+    # Progress tracking variables
+    last_reported_progress = 0
+    
+    def progress_hook(d):
+        """Progress hook for yt-dlp to report download status."""
+        nonlocal last_reported_progress
+        
+        if d['status'] == 'downloading':
+            # Calculate percentage completion
+            if d.get('total_bytes') and d.get('downloaded_bytes'):
+                percentage = (d['downloaded_bytes'] / d['total_bytes']) * 100
+            elif d.get('total_bytes_estimate') and d.get('downloaded_bytes'):
+                percentage = (d['downloaded_bytes'] / d['total_bytes_estimate']) * 100
+            else:
+                percentage = 0
+            
+            # Report progress every 10% or at start/end
+            if (percentage >= last_reported_progress + 10 or
+                (last_reported_progress == 0 and percentage > 0) or
+                percentage >= 100):
+                last_reported_progress = (percentage // 10) * 10  # Round down to nearest 10
+                
+                # Format progress message
+                downloaded_mb = d['downloaded_bytes'] / (1024 * 1024) if d.get('downloaded_bytes') else 0
+                total_mb = (d['total_bytes'] or d['total_bytes_estimate'] or 0) / (1024 * 1024) if (d.get('total_bytes') or d.get('total_bytes_estimate')) else 0
+                
+                # Log progress for LLM to monitor
+                logger.info(f"Download progress: {percentage:.1f}% ({downloaded_mb:.1f}MB/{total_mb:.1f}MB)")
+                
+                # Additional info if available
+                if d.get('eta') is not None:
+                    logger.info(f"Estimated time remaining: {d['eta']} seconds")
+                if d.get('speed') is not None:
+                    speed_kbps = d['speed'] / 1024
+                    logger.info(f"Download speed: {speed_kbps:.1f} KB/s")
+        elif d['status'] == 'finished':
+            logger.info("Download completed, processing video...")
+        elif d['status'] == 'error':
+            logger.error(f"Download error: {d.get('errmsg', 'Unknown error')}")
+
     original_url = url
     if any(host in url for host in ("vm.tiktok.com", "vt.tiktok.com")):
         try:
@@ -431,6 +471,7 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
         'format': 'best[ext=mp4]/best',
         'outtmpl': output_template,
         'writethumbnail': True,
+        'progress_hooks': [progress_hook],  # Add progress hook
     }
 
     video_path = None
