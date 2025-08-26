@@ -358,7 +358,9 @@ def create_post(
             logger.error(f"Failed to create post in r/{clean_subreddit}: {post_error}", exc_info=True) # Log full traceback
             # Check for specific error messages related to video uploads
             error_message = str(post_error)
-            if "Websocket error" in error_message or "MEDIA_UPLOAD_FAILED" in error_message:
+            if "NO_VIDEOS" in error_message:
+                raise ValueError(f"Failed to create post: This community does not allow videos. Original error: {error_message}") from post_error
+            elif "Websocket error" in error_message or "MEDIA_UPLOAD_FAILED" in error_message:
                 raise RuntimeError(
                     f"Failed to create post: {error_message}. This often indicates an issue with the video file "
                     f"(e.g., corrupted, unsupported format, too large) or a temporary Reddit media server problem. "
@@ -732,6 +734,12 @@ def post_downloaded_video(
             comment = f"Original link / link original: {original_url}"
         auto_generated = True
 
+    # Check subreddit video posting allowance before attempting to post
+    if video_path:
+        subreddit_details = get_subreddit_details(subreddit)
+        if not subreddit_details.get("video_post_allowed", False):
+            raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
+            
     post_info = create_post(
         subreddit=subreddit,
         title=title,
@@ -1009,10 +1017,16 @@ def get_subreddit_details(subreddit_name: str) -> Dict[str, Any]:
                     if "no video" in rule.short_name.lower() or "no video" in rule.description.lower() or \
                        "images only" in rule.short_name.lower() or "images only" in rule.description.lower():
                         sub_info["video_post_allowed"] = False
+                        sub_info["video_post_allowed_reason"] = "Rule text indicates no video posts."
             sub_info["rules_info"] = rules
         except Exception as e:
             logger.warning(f"Error fetching rules for r/{clean_subreddit_name}: {e}")
  
+        # Log all attributes of the subreddit object if video posting is disallowed
+        if not sub_info["video_post_allowed"]:
+            logger.info(f"Subreddit r/{clean_subreddit_name} does not allow video posts based on rules. "
+                        f"Subreddit object attributes: {sub.__dict__}")
+
         logger.info(f"Successfully fetched details for r/{clean_subreddit_name}")
         return sub_info
  
