@@ -272,6 +272,19 @@ def create_post(
 
         try:
             if video_path:
+                # Log video file details before submission
+                if video_path and path.exists(video_path):
+                    try:
+                        file_size = path.getsize(video_path)
+                        logger.info(f"Attempting to submit video: {video_path}")
+                        logger.info(f"Video file size: {file_size} bytes")
+                    except Exception as log_error:
+                        logger.warning(f"Error getting video file size: {log_error}")
+                
+                # PRAW's submit_video can sometimes return None if without_websockets is True
+                # or if there's a WebSocketException.
+                # The current implementation catches WebSocketException, but if it returns None,
+                # it means the post might still be created on Reddit's side.
                 submission = subreddit_obj.submit_video(
                     title=title[:300],
                     video_path=video_path,
@@ -281,7 +294,26 @@ def create_post(
                     send_replies=True,
                     flair_id=flair_id,
                     flair_text=flair_text,
+                    # Set without_websockets to True to avoid WebSocketException
+                    # and handle the potential None return.
+                    without_websockets=True,
                 )
+                
+                if submission is None:
+                    # If submission is None, it means the post might have been created
+                    # but PRAW could not retrieve the submission object via websocket.
+                    # We should log this and potentially try to retrieve the submission
+                    # or inform the user to check manually.
+                    logger.warning(
+                        "PRAW's submit_video returned None. The post might still have been created "
+                        "on Reddit. Please check the subreddit manually."
+                    )
+                    # For now, we'll raise a RuntimeError to indicate a potential issue,
+                    # but a more robust solution might involve searching for the post.
+                    raise RuntimeError(
+                        "Video submission might have succeeded, but PRAW could not retrieve "
+                        "the submission object. Please check the subreddit manually."
+                    )
             elif is_self:
                 submission = subreddit_obj.submit(
                     title=title[:300],
