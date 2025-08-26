@@ -735,19 +735,22 @@ def suggest_subreddits(
     time_filters: Optional[List[str]] = None,
     post_sort: str = "top",  # 'top', 'hot', 'new'
 ) -> Dict[str, Any]:
-    """Suggest relevant subreddits for a topic and show top post titles.
-
-    Finds candidate subreddits via search, ranks by subscriber count, then
-    for each selected subreddit retrieves sample post titles for TWO time ranges
-    (default: week & year) when using 'top', or a single retrieval for other sorts.
-
+    """Suggest relevant subreddits for a topic and show sample post titles.
+ 
+    This tool finds candidate subreddits via search and ranks them by subscriber count.
+    For each selected subreddit, it retrieves sample post titles for specified time ranges
+    (default: week & year for 'top' sort) or a single retrieval for other sorts.
+    
+    For detailed information about a specific subreddit's rules, flair, and video posting
+    allowance, use the `get_subreddit_details` tool.
+ 
     Args:
         query: Topic / keywords to search for.
         limit_subreddits: Max number of subreddits to return.
         posts_limit: Max sample posts per subreddit per time frame (will be capped at 5 for LLM context consistency).
         time_filters: List of two time filters (e.g. ['week','year']). Ignored for non-'top' sorts.
         post_sort: Post sorting method ('top','hot','new').
-
+ 
     Returns:
         Dict containing ranked subreddit suggestions and sample titles, PLUS a compact
         'llm_context' string explicitly summarizing each subreddit with subscriber counts
@@ -810,36 +813,8 @@ def suggest_subreddits(
                 "public_description": getattr(sub, "public_description", "")[:300],
                 "url": f"https://reddit.com{sub.url}",
                 "sample_posts": {},
-                "flair_info": [],
-                "rules_info": [],
-                "video_post_allowed": True, # Assume allowed unless rule says otherwise
             }
             try:
-                # Fetch flair templates
-                flair_templates = []
-                for template in sub.flair.templates:
-                    flair_templates.append({
-                        "id": template.id,
-                        "text": template.text,
-                        "text_editable": template.text_editable,
-                        "type": template.type,
-                    })
-                sub_info["flair_info"] = flair_templates
-
-                # Fetch rules and check for video restrictions
-                rules = []
-                for rule in sub.rules:
-                    rules.append({
-                        "short_name": rule.short_name,
-                        "description": rule.description,
-                    })
-                    # Simple keyword matching for video restrictions
-                    if "video" in rule.short_name.lower() or "video" in rule.description.lower():
-                        if "no video" in rule.short_name.lower() or "no video" in rule.description.lower() or \
-                           "images only" in rule.short_name.lower() or "images only" in rule.description.lower():
-                            sub_info["video_post_allowed"] = False
-                sub_info["rules_info"] = rules
-
                 if post_sort == "top":
                     for tf in time_filters:  # two time frames
                         titles: List[str] = []
@@ -857,28 +832,25 @@ def suggest_subreddits(
                     sub_info["sample_posts"]["new"] = titles
             except Exception as e:
                 sub_info["sample_posts"]["error"] = str(e)
-                logger.warning(f"Error fetching subreddit details for r/{sub.display_name}: {e}")
+                logger.warning(f"Error fetching sample posts for r/{sub.display_name}: {e}")
             suggestions.append(sub_info)
-
+ 
     except Exception as e:
         logger.error(f"Failed subreddit suggestion search: {e}")
         raise RuntimeError(f"Failed subreddit suggestion search: {e}") from e
-
+ 
     # Build LLM-friendly compact context (always two time frames, 5 titles each if available)
     llm_lines: List[str] = []
     capped = 5  # enforce 5 per timeframe for LLM context
     for idx, sub in enumerate(suggestions, start=1):
         subs = sub.get("subscribers")
-        flair_info = ", ".join([f"'{f['text']}' (editable: {f['text_editable']})" for f in sub['flair_info']]) if sub['flair_info'] else "None"
-        rules_summary = "; ".join([f"'{r['short_name']}'" for r in sub['rules_info']]) if sub['rules_info'] else "None"
-        video_allowed_status = "Allowed" if sub['video_post_allowed'] else "Not Allowed"
-
+ 
         if post_sort == "top":
             tf1, tf2 = time_filters[0], time_filters[1]
             tf1_titles = sub["sample_posts"].get(f"top_{tf1}", [])[:capped]
             tf2_titles = sub["sample_posts"].get(f"top_{tf2}", [])[:capped]
             llm_lines.append(
-                f"{idx}. r/{sub['name']} (subs: {subs}) | Video Posts: {video_allowed_status} | Flair: [{flair_info}] | Rules: [{rules_summary}] | top_{tf1}: "
+                f"{idx}. r/{sub['name']} (subs: {subs}) | top_{tf1}: "
                 + " | ".join(tf1_titles)
                 + " || top_{tf2}: "
                 + " | ".join(tf2_titles)
@@ -887,12 +859,12 @@ def suggest_subreddits(
             key = post_sort
             titles = sub["sample_posts"].get(key, [])[:10]
             llm_lines.append(
-                f"{idx}. r/{sub['name']} (subs: {subs}) | Video Posts: {video_allowed_status} | Flair: [{flair_info}] | Rules: [{rules_summary}] | {key}: "
+                f"{idx}. r/{sub['name']} (subs: {subs}) | {key}: "
                 + " | ".join(titles)
             )
-
+ 
     llm_context_string = "\n".join(llm_lines)
-
+ 
     return {
         "query": query,
         "post_sort": post_sort,
@@ -903,19 +875,102 @@ def suggest_subreddits(
         "suggestions": suggestions,
         "llm_context": llm_context_string,
         "llm_context_list": llm_lines,
-        "note": "llm_context includes subreddit, subscriber count, video post allowance, flair info, rules summary, and 5 titles per each of two time frames (total 10). Adjust time_filters to change frames.",
+        "note": "llm_context includes subreddit, subscriber count, and 5 titles per each of two time frames (total 10). Use get_subreddit_details for flair and rules.",
     }
-
+ 
+@mcp.tool()
+def get_subreddit_details(subreddit_name: str) -> Dict[str, Any]:
+    """Get detailed information about a single subreddit, including rules and flair.
+ 
+    Args:
+        subreddit_name: The name of the subreddit (e.g., 'workreform' or 'r/workreform').
+ 
+    Returns:
+        A dictionary containing detailed subreddit information, including:
+        - name, title, subscribers, over18 status, public_description, url
+        - flair_info: List of available flair templates (id, text, text_editable, type)
+        - rules_info: List of subreddit rules (short_name, description)
+        - video_post_allowed: Boolean indicating if video posts are explicitly allowed or disallowed.
+ 
+    Raises:
+        ValueError: If the subreddit name is invalid or not found.
+        RuntimeError: For other errors during API interaction.
+    """
+    manager = RedditClientManager()
+    if not manager.client:
+        raise RuntimeError("Reddit client not initialized")
+ 
+    if not subreddit_name or not isinstance(subreddit_name, str):
+        raise ValueError("Subreddit name is required")
+ 
+    clean_subreddit_name = subreddit_name[2:] if subreddit_name.startswith("r/") else subreddit_name
+ 
+    try:
+        logger.info(f"Fetching details for subreddit r/{clean_subreddit_name}")
+        sub = manager.client.subreddit(clean_subreddit_name)
+        # Access a property to ensure the subreddit exists and is accessible
+        _ = sub.display_name
+ 
+        sub_info: Dict[str, Any] = {
+            "name": sub.display_name,
+            "title": getattr(sub, "title", ""),
+            "subscribers": getattr(sub, "subscribers", None),
+            "over18": getattr(sub, "over18", None),
+            "public_description": getattr(sub, "public_description", "")[:300],
+            "url": f"https://reddit.com{sub.url}",
+            "flair_info": [],
+            "rules_info": [],
+            "video_post_allowed": True,  # Assume allowed unless rule says otherwise
+        }
+ 
+        # Fetch flair templates
+        flair_templates = []
+        try:
+            for template in sub.flair.templates:
+                flair_templates.append({
+                    "id": template.id,
+                    "text": template.text,
+                    "text_editable": template.text_editable,
+                    "type": template.type,
+                })
+            sub_info["flair_info"] = flair_templates
+        except Exception as e:
+            logger.warning(f"Error fetching flair templates for r/{clean_subreddit_name}: {e}")
+ 
+        # Fetch rules and check for video restrictions
+        rules = []
+        try:
+            for rule in sub.rules:
+                rules.append({
+                    "short_name": rule.short_name,
+                    "description": rule.description,
+                })
+                # Simple keyword matching for video restrictions
+                if "video" in rule.short_name.lower() or "video" in rule.description.lower():
+                    if "no video" in rule.short_name.lower() or "no video" in rule.description.lower() or \
+                       "images only" in rule.short_name.lower() or "images only" in rule.description.lower():
+                        sub_info["video_post_allowed"] = False
+            sub_info["rules_info"] = rules
+        except Exception as e:
+            logger.warning(f"Error fetching rules for r/{clean_subreddit_name}: {e}")
+ 
+        logger.info(f"Successfully fetched details for r/{clean_subreddit_name}")
+        return sub_info
+ 
+    except Exception as e:
+        logger.error(f"Failed to get subreddit details for r/{clean_subreddit_name}: {e}")
+        raise ValueError(f"Subreddit '{clean_subreddit_name}' not found or inaccessible: {e}") from e
+ 
 # --- Server entrypoint ---
 if __name__ == "__main__":
     import argparse, subprocess, sys, shutil, os as _os
-
+ 
     parser = argparse.ArgumentParser(description="Run TikTok→Reddit MCP server")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8050)), help="Proxy HTTP port (mcpo)")
     parser.add_argument("--host", type=str, default=os.getenv("HOST", "0.0.0.0"), help="Proxy host (mcpo)")
     parser.add_argument("--no-proxy", action="store_true", help="Run raw MCP server (stdio) without mcpo HTTP proxy")
     args = parser.parse_args()
-
+ 
     # Child/raw mode: just run stdio MCP server
     if args.no_proxy or os.getenv("MCPO_CHILD") == "1":
         logger.info("Starting raw MCP stdio server (read_only=%s)", RedditClientManager().is_read_only)
@@ -924,22 +979,22 @@ if __name__ == "__main__":
         except TypeError:
             mcp.run()
         sys.exit(0)
-
+ 
     # Parent: launch mcpo with proper syntax: mcpo --host H --port P [--api-key K] -- python server.py --no-proxy
     api_key = os.getenv("MCPO_API_KEY")
     mcpo_path = shutil.which("mcpo")
     if not mcpo_path:
         logger.error("mcpo console script not found on PATH. Install with: pip install mcpo")
         sys.exit(1)
-
+ 
     server_script = _os.path.abspath(__file__)
     server_cmd = [sys.executable, server_script, "--no-proxy"]
-
+ 
     mcpo_cmd = [mcpo_path, "--host", args.host, "--port", str(args.port)]
     if api_key:
         mcpo_cmd += ["--api-key", api_key]
     mcpo_cmd += ["--"] + server_cmd
-
+ 
     logger.info("Launching mcpo proxy: %s", " ".join(mcpo_cmd))
     # Mark child for clarity (not strictly needed because of --no-proxy flag)
     env = os.environ.copy()
