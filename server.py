@@ -5,6 +5,7 @@ from datetime import datetime
 from os import getenv, makedirs, path, remove
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar, cast
 import yt_dlp
+import yt_dlp.utils
 import requests
 import praw  # type: ignore
 import os
@@ -415,6 +416,19 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
     if not path.exists(download_folder):
         makedirs(download_folder)
 
+# Check and update yt-dlp to latest version
+    try:
+        import subprocess
+        import sys
+        logger.info("Checking for yt-dlp updates...")
+        result = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"], 
+                               capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            logger.info("yt-dlp is up to date")
+        else:
+            logger.warning(f"Failed to update yt-dlp: {result.stderr}")
+    except Exception as e:
+        logger.warning(f"Error checking for yt-dlp updates: {e}")
     # Progress tracking variables
     last_reported_progress = 0
     
@@ -463,6 +477,38 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
             url = head.url
         except Exception as e:
             raise RuntimeError(f"Failed to resolve short TikTok link: {e}") from e
+# Check if video already exists locally
+    try:
+        # Extract video ID from URL for pre-check
+        video_id_from_url = None
+        if "/video/" in url:
+            # Extract ID from TikTok URL like https://www.tiktok.com/@user/video/123456789123456789
+            parts = url.split("/video/")
+            if len(parts) > 1:
+                video_id_from_url = parts[1].split("?")[0]  # Remove query parameters if any
+        
+        # Check if a file with this ID already exists in the download folder
+        if video_id_from_url:
+            # Check for common video extensions
+            for ext in ('.mp4', '.mov', '.mkv', '.webm', '.avi', '.flv'):
+                existing_file = path.join(download_folder, f"{video_id_from_url}{ext}")
+                if path.exists(existing_file):
+                    logger.info(f"Video {video_id_from_url} already exists locally: {existing_file}")
+                    # Return result indicating video is already available
+                    result = {
+                        'original_url': original_url,
+                        'resolved_url': url,
+                        'video_id': video_id_from_url,
+                        'video_path': existing_file,
+                        'thumbnail_deleted': True,  # Assume thumbnail was deleted previously
+                        'kept': keep,
+                        'already_exists': True,
+                        'message': f'Video {video_id_from_url} already exists locally'
+                    }
+                    logger.info(f"Video already exists. Returning result: {result}")
+                    return result
+    except Exception as e:
+        logger.warning(f"Error during pre-download check: {e}")
 
     output_template = path.join(download_folder, '%(id)s.%(ext)s')
     ydl_opts = {
@@ -493,8 +539,12 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
                     except Exception:
                         pass
                     break
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"yt-dlp download error: {e}")
+        raise RuntimeError(f"Failed to download TikTok video: {e}. This might be due to an invalid URL, geo-restrictions, or changes in TikTok's website. Please check the URL and try again.") from e
     except Exception as e:
-        raise RuntimeError(f"Failed to download TikTok video: {e}") from e
+        logger.error(f"An unexpected error occurred during download: {e}")
+        raise RuntimeError(f"An unexpected error occurred during TikTok video download: {e}") from e
 
     result = {
         'original_url': original_url,
@@ -513,7 +563,10 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
             pass
     
     # Log completion message for LLM to monitor
+# Log completion message for LLM to monitor
     logger.info(f"Download completed successfully. Video ID: {video_id}")
+    logger.info(f"Video available at: {video_path}")
+    logger.info(f"Returning result: {result}")
     return result
 
 @mcp.tool()
