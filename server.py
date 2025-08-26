@@ -217,6 +217,38 @@ def _extract_reddit_id(reddit_id: str) -> str:
 
     return reddit_id
 
+
+def _find_submission_by_title(
+    subreddit_obj: praw.models.Subreddit, title: str, max_age_seconds: int = 300
+) -> Optional[praw.models.Submission]:
+    """Attempt to find a submission by title in a given subreddit within a time window.
+
+    Args:
+        subreddit_obj: The PRAW Subreddit object to search within.
+        title: The title of the post to search for.
+        max_age_seconds: Maximum age of the post in seconds to consider (default: 5 minutes).
+
+    Returns:
+        The praw.models.Submission object if found, otherwise None.
+    """
+    logger.info(f"Attempting to find submission by title '{title}' in r/{subreddit_obj.display_name}")
+    search_time = time.time() - max_age_seconds
+    
+    # Search in new and hot for recent posts
+    for submission in subreddit_obj.new(limit=10): # Check up to 10 new posts
+        if submission.created_utc > search_time and submission.title == title:
+            logger.info(f"Found new submission by title: {submission.permalink}")
+            return submission
+    
+    for submission in subreddit_obj.hot(limit=10): # Check up to 10 hot posts
+        if submission.created_utc > search_time and submission.title == title:
+            logger.info(f"Found hot submission by title: {submission.permalink}")
+            return submission
+            
+    logger.info(f"No recent submission found with title '{title}' in r/{subreddit_obj.display_name}")
+    return None
+
+
 @require_write_access
 def create_post(
     subreddit: str,
@@ -281,39 +313,60 @@ def create_post(
                     except Exception as log_error:
                         logger.warning(f"Error getting video file size: {log_error}")
                 
-                # PRAW's submit_video can sometimes return None if without_websockets is True
-                # or if there's a WebSocketException.
-                # The current implementation catches WebSocketException, but if it returns None,
-                # it means the post might still be created on Reddit's side.
-                submission = subreddit_obj.submit_video(
-                    title=title[:300],
-                    video_path=video_path,
-                    thumbnail_path=thumbnail_path,
-                    nsfw=nsfw,
-                    spoiler=spoiler,
-                    send_replies=True,
-                    flair_id=flair_id,
-                    flair_text=flair_text,
-                    # Set without_websockets to True to avoid WebSocketException
-                    # and handle the potential None return.
-                    without_websockets=True,
-                )
+                submission = None
+                try:
+                    # PRAW's submit_video can sometimes return None if without_websockets is True
+                    # or if there's a WebSocketException.
+                    # The current implementation catches WebSocketException, but if it returns None,
+                    # it means the post might still be created on Reddit's side.
+                    submission = subreddit_obj.submit_video(
+                        title=title[:300],
+                        video_path=video_path,
+                        thumbnail_path=thumbnail_path,
+                        nsfw=nsfw,
+                        spoiler=spoiler,
+                        send_replies=True,
+                        flair_id=flair_id,
+                        flair_text=flair_text,
+                        # Set without_websockets to True to avoid WebSocketException
+                        # and handle the potential None return.
+                        without_websockets=True,
+                    )
+                except praw.exceptions.APIException as api_exc:
+                    logger.error(f"Reddit API error during video submission: {api_exc}", exc_info=True)
+                    raise RuntimeError(
+                        f"Failed to submit video due to Reddit API error: {api_exc}. "
+                        "This might indicate issues with video format, size, or subreddit settings."
+                    ) from api_exc
+                except requests.exceptions.RequestException as req_exc:
+                    logger.error(f"Network error during video submission: {req_exc}", exc_info=True)
+                    raise RuntimeError(
+                        f"Failed to submit video due to network error: {req_exc}. "
+                        "Please check your internet connection or try again later."
+                    ) from req_exc
+                except Exception as e:
+                    logger.error(f"An unexpected error occurred during video submission: {e}", exc_info=True)
+                    raise RuntimeError(
+                        f"An unexpected error occurred during video submission: {e}. "
+                        "Please check the video file and try again."
+                    ) from e
                 
                 if submission is None:
-                    # If submission is None, it means the post might have been created
-                    # but PRAW could not retrieve the submission object via websocket.
-                    # We should log this and potentially try to retrieve the submission
-                    # or inform the user to check manually.
                     logger.warning(
-                        "PRAW's submit_video returned None. The post might still have been created "
-                        "on Reddit. Please check the subreddit manually."
+                        "PRAW's submit_video returned None. Attempting to find the submission by title."
                     )
-                    # For now, we'll raise a RuntimeError to indicate a potential issue,
-                    # but a more robust solution might involve searching for the post.
-                    raise RuntimeError(
-                        "Video submission might have succeeded, but PRAW could not retrieve "
-                        "the submission object. Please check the subreddit manually."
-                    )
+                    # Attempt to find the submission by title
+                    submission = _find_submission_by_title(subreddit_obj, title[:300])
+                    
+                    if submission is None:
+                        # If still None, then the post truly failed or is not immediately retrievable
+                        raise RuntimeError(
+                            "Video submission might have succeeded, but PRAW could not retrieve "
+                            "the submission object, and it could not be found by title. "
+                            "Please check the subreddit manually."
+                        )
+                    else:
+                        logger.info(f"Successfully retrieved submission by title: {submission.permalink}")
             elif is_self:
                 submission = subreddit_obj.submit(
                     title=title[:300],
@@ -333,11 +386,13 @@ def create_post(
                     send_replies=True,
                 )
             
-            # Apply flair if provided for self-posts or link posts
-            if (flair_id or flair_text) and not video_path:
+            # Apply flair if provided for any post type
+            if (flair_id or flair_text):
                 try:
-                    submission.mod.flair(flair_template_id=flair_id, text=flair_text)
-                    logger.info(f"Applied flair to post {submission.id}: ID={flair_id}, Text='{flair_text}'")
+                    # Only attempt to flair if submission object is valid
+                    if submission:
+                        submission.mod.flair(flair_template_id=flair_id, text=flair_text)
+                        logger.info(f"Applied flair to post {submission.id}: ID={flair_id}, Text='{flair_text}'")
                 except Exception as flair_error:
                     logger.warning(f"Failed to apply flair to post {submission.id}: {flair_error}")
 
