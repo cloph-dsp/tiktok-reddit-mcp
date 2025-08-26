@@ -923,19 +923,21 @@ def get_subreddit_details(subreddit_name: str) -> Dict[str, Any]:
             "video_post_allowed": True,  # Assume allowed unless rule says otherwise
         }
  
-        # Fetch flair templates
+        # Fetch flair templates (specifically for posts)
         flair_templates = []
         try:
-            for template in sub.flair.templates:
-                flair_templates.append({
-                    "id": template.id,
-                    "text": template.text,
-                    "text_editable": template.text_editable,
-                    "type": template.type,
-                })
+            # Check if link flair is enabled for the subreddit
+            if getattr(sub, 'link_flair_enabled', False):
+                for template in sub.flair.link_templates:
+                    flair_templates.append({
+                        "id": template.id,
+                        "text": template.text,
+                        "text_editable": template.text_editable,
+                        "type": template.type,
+                    })
             sub_info["flair_info"] = flair_templates
         except Exception as e:
-            logger.warning(f"Error fetching flair templates for r/{clean_subreddit_name}: {e}")
+            logger.warning(f"Error fetching link flair templates for r/{clean_subreddit_name}: {e}")
  
         # Fetch rules and check for video restrictions
         rules = []
