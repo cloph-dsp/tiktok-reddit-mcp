@@ -323,11 +323,21 @@ def create_post(
             }
 
         except Exception as post_error:
-            logger.error(f"Failed to create post in r/{clean_subreddit}: {post_error}")
-            raise RuntimeError(f"Failed to create post: {post_error}. Please check subreddit name, title, and content.") from post_error
-
+            logger.error(f"Failed to create post in r/{clean_subreddit}: {post_error}", exc_info=True) # Log full traceback
+            # Check for specific error messages related to video uploads
+            error_message = str(post_error)
+            if "Websocket error" in error_message or "MEDIA_UPLOAD_FAILED" in error_message:
+                raise RuntimeError(
+                    f"Failed to create post: {error_message}. This often indicates an issue with the video file "
+                    f"(e.g., corrupted, unsupported format, too large) or a temporary Reddit media server problem. "
+                    f"Your post may still have been created and be awaiting moderation. Please check the video file "
+                    f"and try again if necessary."
+                ) from post_error
+            else:
+                raise RuntimeError(f"Failed to create post: {post_error}. Please check subreddit name, title, and content.") from post_error
+ 
     except Exception as e:
-        logger.error(f"An unexpected error occurred during post creation for r/{clean_subreddit}: {e}")
+        logger.error(f"An unexpected error occurred during post creation for r/{clean_subreddit}: {e}", exc_info=True) # Log full traceback
         raise RuntimeError(f"An unexpected error occurred during post creation: {e}") from e
 
 
@@ -921,6 +931,7 @@ def get_subreddit_details(subreddit_name: str) -> Dict[str, Any]:
             "flair_info": [],
             "rules_info": [],
             "video_post_allowed": True,  # Assume allowed unless rule says otherwise
+            "client_is_read_only": manager.is_read_only, # Report client read-only status
         }
  
         # Fetch flair templates (specifically for posts)
@@ -938,6 +949,20 @@ def get_subreddit_details(subreddit_name: str) -> Dict[str, Any]:
             sub_info["flair_info"] = flair_templates
         except Exception as e:
             logger.warning(f"Error fetching link flair templates for r/{clean_subreddit_name}: {e}")
+ 
+        # Add a note if no flair templates are found, and flair is required
+        if not sub_info["flair_info"]:
+            flair_note_message = "No post flair templates found."
+            if sub_info["client_is_read_only"]:
+                flair_note_message += " This is likely due to the Reddit client being in read-only mode. " \
+                                      "This subreddit requires flair from a template, so you MUST provide " \
+                                      "REDDIT_USERNAME and REDDIT_PASSWORD environment variables for full access " \
+                                      "to fetch the available flair templates."
+            else:
+                flair_note_message += " This subreddit might not have public post flair templates, " \
+                                      "or flair is moderator-only. Since custom flair text is not allowed, " \
+                                      "posting may not be possible without access to templates."
+            sub_info["flair_note"] = flair_note_message
  
         # Fetch rules and check for video restrictions
         rules = []
