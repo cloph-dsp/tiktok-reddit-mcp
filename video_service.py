@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 import sys
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 class VideoService:
     """Encapsulates video download and processing logic."""
 
-    def download_tiktok_video(self, ctx: Any, url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
+    async def download_tiktok_video(self, ctx: Any, url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
         """Download a TikTok video using yt-dlp (thumbnail discarded immediately).
 
         Args:
@@ -50,6 +51,20 @@ class VideoService:
                 logger.warning(f"Failed to update yt-dlp: {result.stderr}")
         except Exception as e:
             logger.warning(f"Error checking for yt-dlp updates: {e}")
+
+        # Check if ctx has the report_progress attribute
+        if hasattr(ctx, 'report_progress'):
+            report_progress = ctx.report_progress
+        elif hasattr(ctx, '__event_emitter__'):
+            async def report_progress(data: Dict[str, Any]) -> None:
+                await ctx.__event_emitter__({
+                    "type": "status",
+                    "data": {"description": data.get("message", "Unknown status"), "done": False}
+                })
+        else:
+            logger.warning("ctx object does not have report_progress or __event_emitter__ attribute. Creating a dummy function.")
+            async def report_progress(data: Dict[str, Any]) -> None:
+                logger.info(f"Dummy report_progress called with: {data}")
 
         # Progress tracking variables
         last_reported_progress = 0
@@ -95,12 +110,12 @@ class VideoService:
                         speed_kbps = d['speed'] / 1024
                         progress_message["speed_kbps"] = f"{speed_kbps:.1f} KB/s"
 
-                    ctx.report_progress(progress_message)
+                    asyncio.create_task(report_progress(progress_message))
 
             elif d['status'] == 'finished':
-                ctx.report_progress({"status": "finished", "message": "Download completed, processing video..."})
+                asyncio.create_task(report_progress({"status": "finished", "message": "Download completed, processing video..."}))
             elif d['status'] == 'error':
-                ctx.report_progress({"status": "error", "message": f"Download error: {d.get('errmsg', 'Unknown error')}"})
+                asyncio.create_task(report_progress({"status": "error", "message": f"Download error: {d.get('errmsg', 'Unknown error')}"}))
 
         original_url = url
         if any(host in url for host in ("vm.tiktok.com", "vt.tiktok.com")):
@@ -159,7 +174,7 @@ class VideoService:
         thumbnail_deleted = False
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                info = await asyncio.to_thread(ydl.extract_info, url, download=True)
                 video_id = info.get('id')
                 video_path = ydl.prepare_filename(info)
                 base_filename, _ = path.splitext(video_path)

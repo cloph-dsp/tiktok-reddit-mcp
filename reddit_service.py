@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 import sys
@@ -26,7 +27,19 @@ class RedditService:
     def __init__(self):
         self.manager = RedditClientManager()
 
-    def create_post(
+    async def _report_progress(self, ctx: Any, data: Dict[str, Any]) -> None:
+        """Report progress via ctx.report_progress if available."""
+        if hasattr(ctx, 'report_progress'):
+            ctx.report_progress(data)
+        elif hasattr(ctx, '__event_emitter__'):
+            await ctx.__event_emitter__({
+                "type": "status",
+                "data": {"description": data.get("message", "Unknown status"), "done": False}
+            })
+        else:
+            logger.info(f"Progress: {data}")
+
+    async def create_post(
         self,
         ctx: Any,
         subreddit: str,
@@ -95,10 +108,10 @@ class RedditService:
                             file_size = path.getsize(video_path)
                             logger.info(f"Attempting to submit video: {video_path}")
                             logger.info(f"Video file size: {file_size} bytes")
-                            ctx.report_progress({"status": "uploading", "message": f"Starting video upload: {file_size} bytes"})
+                            await self._report_progress(ctx, {"status": "uploading", "message": f"Starting video upload: {file_size} bytes"})
                         except Exception as log_error:
                             logger.warning(f"Error getting video file size: {log_error}")
-                            ctx.report_progress({"status": "uploading", "message": f"Starting video upload (file size unknown): {log_error}"})
+                            await self._report_progress(ctx, {"status": "uploading", "message": f"Starting video upload (file size unknown): {log_error}"})
 
                     submission = None
                     max_retries = 3
@@ -125,7 +138,7 @@ class RedditService:
                                 time.sleep(2 ** attempt)  # Exponential backoff
                             else:
                                 logger.error("Max retries reached for WebSocket error.")
-                                ctx.report_progress({"status": "error", "message": f"WebSocket error after {max_retries} attempts: {ws_exc}"})
+                                await self._report_progress(ctx, {"status": "error", "message": f"WebSocket error after {max_retries} attempts: {ws_exc}"})
                                 raise RuntimeError(
                                     f"Failed to submit video due to WebSocket error after {max_retries} attempts: {ws_exc}. "
                                     "This might indicate a temporary Reddit issue or a problem with the video file. "
@@ -133,7 +146,7 @@ class RedditService:
                                 ) from ws_exc
                         except praw.exceptions.APIException as api_exc:
                             logger.error(f"Reddit API error during video submission (attempt {attempt}): {api_exc}", exc_info=True)
-                            ctx.report_progress({"status": "error", "message": f"Reddit API error during video submission: {api_exc}"})
+                            await self._report_progress(ctx, {"status": "error", "message": f"Reddit API error during video submission: {api_exc}"})
                             # Specific handling for common API errors
                             error_type = api_exc.error_type if hasattr(api_exc, 'error_type') else str(api_exc)
                             if "RATELIMIT" in error_type:
@@ -159,7 +172,7 @@ class RedditService:
                                 ) from api_exc
                         except requests.exceptions.RequestException as req_exc:
                             logger.error(f"Network error during video submission (attempt {attempt}): {req_exc}", exc_info=True)
-                            ctx.report_progress({"status": "error", "message": f"Network error during video submission: {req_exc}"})
+                            await self._report_progress(ctx, {"status": "error", "message": f"Network error during video submission: {req_exc}"})
                             if attempt < max_retries:
                                 logger.info("Retrying video submission after network error...")
                                 time.sleep(2 ** attempt)  # Exponential backoff
@@ -170,7 +183,7 @@ class RedditService:
                                 ) from req_exc
                         except Exception as e:
                             logger.error(f"An unexpected error occurred during video submission (attempt {attempt}): {e}", exc_info=True)
-                            ctx.report_progress({"status": "error", "message": f"Unexpected error during video submission: {e}"})
+                            await self._report_progress(ctx, {"status": "error", "message": f"Unexpected error during video submission: {e}"})
                             if attempt < max_retries:
                                 logger.info("Retrying video submission after unexpected error...")
                                 time.sleep(2 ** attempt)  # Exponential backoff
@@ -198,9 +211,9 @@ class RedditService:
                             )
                         else:
                             logger.info(f"Successfully retrieved submission by title: {submission.permalink}")
-                            ctx.report_progress({"status": "completed", "message": f"Successfully retrieved submission by title: {submission.permalink}"})
+                            await self._report_progress(ctx, {"status": "completed", "message": f"Successfully retrieved submission by title: {submission.permalink}"})
                     else:
-                        ctx.report_progress({"status": "completed", "message": f"Video submitted successfully: {submission.permalink}"})
+                        await self._report_progress(ctx, {"status": "completed", "message": f"Video submitted successfully: {submission.permalink}"})
                 elif is_self:
 
                     submission = subreddit_obj.submit(
@@ -210,7 +223,7 @@ class RedditService:
                         spoiler=spoiler,
                         send_replies=True,
                     )
-                    ctx.report_progress({"status": "completed", "message": f"Text post created: {submission.permalink}"})
+                    await self._report_progress(ctx, {"status": "completed", "message": f"Text post created: {submission.permalink}"})
                 else:
 
                     if content and not content.startswith(("http://", "https://")):
@@ -222,7 +235,7 @@ class RedditService:
                         spoiler=spoiler,
                         send_replies=True,
                     )
-                    ctx.report_progress({"status": "completed", "message": f"Link post created: {submission.permalink}"})
+                    await self._report_progress(ctx, {"status": "completed", "message": f"Link post created: {submission.permalink}"})
 
                 # Apply flair if provided for any post type
                 if (flair_id or flair_text):
@@ -232,13 +245,13 @@ class RedditService:
                         if submission:
                             submission.mod.flair(flair_template_id=flair_id, text=flair_text)
                             logger.info(f"Applied flair to post {submission.id}: ID={flair_id}, Text='{flair_text}'")
-                            ctx.report_progress({"status": "applying_flair", "message": f"Flair applied: ID={flair_id}, Text='{flair_text}'"})
+                            await self._report_progress(ctx, {"status": "applying_flair", "message": f"Flair applied: ID={flair_id}, Text='{flair_text}'"})
                     except Exception as flair_error:
                         logger.warning(f"Failed to apply flair to post {submission.id}: {flair_error}")
-                        ctx.report_progress({"status": "applying_flair", "message": f"Failed to apply flair: {flair_error}"})
+                        await self._report_progress(ctx, {"status": "applying_flair", "message": f"Failed to apply flair: {flair_error}"})
 
                 logger.info(f"Post created successfully: {submission.permalink}")
-                ctx.report_progress({"status": "completed", "message": f"Post created successfully: {submission.permalink}"})
+                await self._report_progress(ctx, {"status": "completed", "message": f"Post created successfully: {submission.permalink}"})
 
                 return {
                     "post": _format_post(submission),
@@ -271,7 +284,7 @@ class RedditService:
             logger.error(f"An unexpected error occurred during post creation for r/{clean_subreddit}: {e}", exc_info=True) # Log full traceback
             raise RedditPostError(f"An unexpected error occurred during post creation: {e}", original_exception=e) from e
 
-    def reply_to_post(
+    async def reply_to_post(
         self, ctx: Any, post_id: str, content: str, subreddit: Optional[str] = None
     ) -> Dict[str, Any]:
         """Post a reply to an existing Reddit post.
@@ -308,7 +321,7 @@ class RedditService:
         try:
             clean_post_id = _extract_reddit_id(post_id)
             logger.info(f"Creating reply to post ID: {clean_post_id}")
-            ctx.report_progress({"status": "replying_to_post", "message": f"Creating reply to post ID: {clean_post_id}"})
+            await self._report_progress(ctx, {"status": "replying_to_post", "message": f"Creating reply to post ID: {clean_post_id}"})
 
             submission = self.manager.client.submission(id=clean_post_id)
 
@@ -321,18 +334,18 @@ class RedditService:
                     f"Title: {post_title}, "
                     f"Subreddit: r/{post_subreddit.display_name}"
                 )
-                ctx.report_progress({"status": "replying_to_post", "message": f"Replying to post: Title: {post_title}, Subreddit: r/{post_subreddit.display_name}"})
+                await self._report_progress(ctx, {"status": "replying_to_post", "message": f"Replying to post: Title: {post_title}, Subreddit: r/{post_subreddit.display_name}"})
 
             except Exception as e:
                 logger.error(f"Failed to access post {clean_post_id}: {e}")
-                ctx.report_progress({"status": "error", "message": f"Failed to access post {clean_post_id}: {e}"})
+                await self._report_progress(ctx, {"status": "error", "message": f"Failed to access post {clean_post_id}: {e}"})
                 raise ValueError(f"Post {clean_post_id} not found or inaccessible") from e
 
             if (
                 clean_subreddit
                 and post_subreddit.display_name.lower() != clean_subreddit.lower()
             ):
-                ctx.report_progress({"status": "error", "message": f"Post is in r/{post_subreddit.display_name}, not r/{clean_subreddit}"})
+                await self._report_progress(ctx, {"status": "error", "message": f"Post is in r/{post_subreddit.display_name}, not r/{clean_subreddit}"})
                 raise ValueError(
                     f"Post is in r/{post_subreddit.display_name}, not r/{clean_subreddit}"
                 )
@@ -340,7 +353,7 @@ class RedditService:
             try:
                 reply = submission.reply(content)
                 logger.info(f"Reply created successfully: {reply.permalink}")
-                ctx.report_progress({"status": "reply_created", "message": f"Reply created successfully: {reply.permalink}"})
+                await self._report_progress(ctx, {"status": "reply_created", "message": f"Reply created successfully: {reply.permalink}"})
 
                 return {
                     "reply_id": reply.id,
@@ -357,7 +370,7 @@ class RedditService:
             logger.error(f"An unexpected error occurred while replying to post {post_id}: {e}")
             raise RuntimeError(f"An unexpected error occurred while replying to post: {e}") from e
 
-    def suggest_subreddits(
+    async def suggest_subreddits(
         self,
         query: str,
         limit_subreddits: int = 5,
@@ -507,7 +520,7 @@ class RedditService:
             "note": "llm_context includes subreddit, subscriber count, and 5 titles per each of two time frames (total 10). Use get_subreddit_details for flair and rules.",
         }
 
-    def get_subreddit_details(self, subreddit_name: str) -> Dict[str, Any]:
+    async def get_subreddit_details(self, subreddit_name: str) -> Dict[str, Any]:
         """Get detailed information about a single subreddit, including rules and flair.
 
         Args:

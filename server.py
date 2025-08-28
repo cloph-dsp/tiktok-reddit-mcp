@@ -74,7 +74,7 @@ reddit_service = RedditService()
 video_service = VideoService()
 transcription_service = TranscriptionService()
 @require_write_access
-def create_post(
+async def create_post(
     ctx: Any,
     subreddit: str,
     title: str,
@@ -107,7 +107,7 @@ def create_post(
         ValueError: If input validation fails
         RuntimeError: For other errors during post creation
     """
-    return reddit_service.create_post(
+    return await reddit_service.create_post(
         ctx=ctx,
         subreddit=subreddit,
         title=title,
@@ -123,7 +123,7 @@ def create_post(
 
 
 @require_write_access
-def reply_to_post(
+async def reply_to_post(
     ctx: Any, post_id: str, content: str, subreddit: Optional[str] = None
 ) -> Dict[str, Any]:
     """Post a reply to an existing Reddit post.
@@ -141,7 +141,7 @@ def reply_to_post(
         ValueError: If input validation fails or post is not found
         RuntimeError: For other errors during reply creation
     """
-    return reddit_service.reply_to_post(
+    return await reddit_service.reply_to_post(
         ctx=ctx,
         post_id=post_id,
         content=content,
@@ -149,7 +149,7 @@ def reply_to_post(
     )
 
 @mcp.tool()
-def download_tiktok_video(ctx: Any, url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
+async def download_tiktok_video(ctx: Any, url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
     """Download a TikTok video using yt-dlp (thumbnail discarded immediately).
  
     Args:
@@ -161,7 +161,7 @@ def download_tiktok_video(ctx: Any, url: str, download_folder: str = "downloaded
     Returns:
         Dict with video_id, video_path (may be deleted later), thumbnail_deleted flag
     """
-    return video_service.download_tiktok_video(
+    return await video_service.download_tiktok_video(
         ctx=ctx,
         url=url,
         download_folder=download_folder,
@@ -169,7 +169,7 @@ def download_tiktok_video(ctx: Any, url: str, download_folder: str = "downloaded
     )
 
 @mcp.tool()
-def transcribe_video(ctx: Any, video_path: str, model_size: str = "small") -> Dict[str, Any]:
+async def transcribe_video(ctx: Any, video_path: str, model_size: str = "small") -> Dict[str, Any]:
     """Transcribe a downloaded video using faster-whisper if enabled.
 
     Args:
@@ -180,7 +180,7 @@ def transcribe_video(ctx: Any, video_path: str, model_size: str = "small") -> Di
     Returns:
         Dict with transcript and segments. If transcription disabled, returns message.
     """
-    return transcription_service.transcribe_video(
+    return await transcription_service.transcribe_video(
         ctx=ctx,
         video_path=video_path,
         model_size=model_size
@@ -188,7 +188,7 @@ def transcribe_video(ctx: Any, video_path: str, model_size: str = "small") -> Di
 
 @mcp.tool()
 @require_write_access
-def post_downloaded_video(
+async def post_downloaded_video(
     ctx: Any,
     video_path: Optional[str] = None,
     subreddit: str = "",
@@ -250,7 +250,7 @@ def post_downloaded_video(
 
     # Check subreddit video posting allowance before attempting to post
     if video_path:
-        subreddit_details = get_subreddit_details(subreddit)
+        subreddit_details = await reddit_service.get_subreddit_details(subreddit)
         if not subreddit_details.get("video_post_allowed", False):
             raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
     
@@ -271,15 +271,22 @@ def post_downloaded_video(
             # We'll proceed anyway, as Reddit might give a more informative error
     
     # Check if ctx has the report_progress attribute
-    if not hasattr(ctx, 'report_progress'):
-        logger.warning("ctx object does not have report_progress attribute. Creating a dummy function.")
-        def report_progress(data: Dict[str, Any]) -> None:
+    if hasattr(ctx, 'report_progress'):
+        report_progress = ctx.report_progress
+    elif hasattr(ctx, '__event_emitter__'):
+        async def report_progress(data: Dict[str, Any]) -> None:
+            await ctx.__event_emitter__({
+                "type": "status",
+                "data": {"description": data.get("message", "Unknown status"), "done": False}
+            })
+    else:
+        logger.warning("ctx object does not have report_progress or __event_emitter__ attribute. Creating a dummy function.")
+        async def report_progress(data: Dict[str, Any]) -> None:
             logger.info(f"Dummy report_progress called with: {data}")
-        ctx.report_progress = report_progress
 
-    ctx.report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
+    await report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
     try:
-        post_info = create_post(
+        post_info = await create_post(
             ctx=ctx,
             subreddit=subreddit,
             title=title,
@@ -290,13 +297,13 @@ def post_downloaded_video(
             flair_id=flair_id,
             flair_text=flair_text,
         )
-        ctx.report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
+        await report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
         result: Dict[str, Any] = { 'post': post_info, 'used_video_path': video_path }
         if comment:
-            ctx.report_progress({"status": "posting_video", "message": "Adding comment to post..."})
+            await report_progress({"status": "posting_video", "message": "Adding comment to post..."})
             post_id = post_info['metadata']['id']
-            reply = reply_to_post(ctx=ctx, post_id=post_id, content=comment)
-            ctx.report_progress({"status": "posting_video", "message": "Comment added."})
+            reply = await reply_to_post(ctx=ctx, post_id=post_id, content=comment)
+            await report_progress({"status": "posting_video", "message": "Comment added."})
             result['comment'] = reply
             result['comment_language'] = lang
             result['auto_comment_generated'] = auto_generated
@@ -304,28 +311,27 @@ def post_downloaded_video(
             result['comment_language'] = None
             result['auto_comment_generated'] = False
 
+        # Attempt deletion after successful post/comment
+        deleted = False
+        try:
+            if path.exists(video_path):
+                remove(video_path)
+                deleted = True
+            if thumbnail_path and path.exists(thumbnail_path):
+                try: remove(thumbnail_path)
+                except Exception: pass
+        except Exception as e:
+            logger.warning(f"Failed to delete video or thumbnail after posting: {e}")
+            pass
+        
+        logger.info(f"Video posted successfully to Reddit. Permalink: {post_info['metadata']['permalink']}")
+        return result
     except Exception as e:
-        logger.error(f"Error creating post: {e}")
+        logger.error(f"Error in post_downloaded_video: {e}")
         raise
 
-    # Attempt deletion after successful post/comment
-    deleted = False
-    try:
-        if path.exists(video_path):
-            remove(video_path)
-            deleted = True
-        if thumbnail_path and path.exists(thumbnail_path):
-            try: remove(thumbnail_path)
-            except Exception: pass
-    except Exception as e:
-        logger.warning(f"Failed to delete video or thumbnail after posting: {e}")
-        pass
-    
-    logger.info(f"Video posted successfully to Reddit. Permalink: {post_info['metadata']['permalink']}")
-    return result
-
 @mcp.tool()
-def suggest_subreddits(
+async def suggest_subreddits(
     query: str,
     limit_subreddits: int = 5,
     posts_limit: int = 5,
@@ -476,7 +482,7 @@ def suggest_subreddits(
     }
  
 @mcp.tool()
-def get_subreddit_details(subreddit_name: str) -> Dict[str, Any]:
+async def get_subreddit_details(subreddit_name: str) -> Dict[str, Any]:
     """Get detailed information about a single subreddit, including rules and flair.
  
     Args:
