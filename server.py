@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import logging
 import time
@@ -188,7 +189,7 @@ async def transcribe_video(ctx: Any, video_path: str, model_size: str = "small")
 
 @mcp.tool()
 @require_write_access
-async def post_downloaded_video(
+def post_downloaded_video(
     ctx: Any,
     video_path: Optional[str] = None,
     subreddit: str = "",
@@ -250,7 +251,7 @@ async def post_downloaded_video(
 
     # Check subreddit video posting allowance before attempting to post
     if video_path:
-        subreddit_details = await reddit_service.get_subreddit_details(subreddit)
+        subreddit_details = asyncio.run(reddit_service.get_subreddit_details(subreddit))
         if not subreddit_details.get("video_post_allowed", False):
             raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
     
@@ -270,6 +271,51 @@ async def post_downloaded_video(
             logger.warning(f"Could not determine file size for {video_path}: {e}")
             # We'll proceed anyway, as Reddit might give a more informative error
     
+    # Create an event loop and run the async function
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        result = loop.run_until_complete(_post_downloaded_video_async(
+            ctx=ctx,
+            video_path=video_path,
+            subreddit=subreddit,
+            title=title,
+            thumbnail_path=thumbnail_path,
+            nsfw=nsfw,
+            spoiler=spoiler,
+            flair_id=flair_id,
+            flair_text=flair_text,
+            comment=comment,
+            original_url=original_url,
+            comment_language=comment_language,
+            auto_comment=auto_comment,
+            video_id=video_id,
+            download_folder=download_folder
+        ))
+        return result
+    finally:
+        loop.close()
+
+
+# Helper async function that contains the actual implementation
+async def _post_downloaded_video_async(
+    ctx: Any,
+    video_path: Optional[str],
+    subreddit: str,
+    title: str,
+    thumbnail_path: Optional[str],
+    nsfw: bool,
+    spoiler: bool,
+    flair_id: Optional[str],
+    flair_text: Optional[str],
+    comment: Optional[str],
+    original_url: Optional[str],
+    comment_language: str,
+    auto_comment: bool,
+    video_id: Optional[str],
+    download_folder: str
+) -> Dict[str, Any]:
     # Check if ctx has the report_progress attribute
     if hasattr(ctx, 'report_progress'):
         report_progress = ctx.report_progress
@@ -305,8 +351,8 @@ async def post_downloaded_video(
             reply = await reply_to_post(ctx=ctx, post_id=post_id, content=comment)
             await report_progress({"status": "posting_video", "message": "Comment added."})
             result['comment'] = reply
-            result['comment_language'] = lang
-            result['auto_comment_generated'] = auto_generated
+            result['comment_language'] = comment_language
+            result['auto_comment_generated'] = auto_comment and original_url and not comment
         else:
             result['comment_language'] = None
             result['auto_comment_generated'] = False
