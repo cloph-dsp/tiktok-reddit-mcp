@@ -1,15 +1,25 @@
 import functools
 import logging
 import time
+import sys # Import sys for stdout flushing
 from datetime import datetime
 from os import getenv, makedirs, path, remove
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar, cast
+from urllib.parse import urlparse, urlunparse # Import for URL sanitization
 import yt_dlp
 import yt_dlp.utils
 import requests
 import praw  # type: ignore
 import os
 from mcp.server.fastmcp import FastMCP
+
+# Import services
+from reddit_service import RedditService
+from video_service import VideoService
+from transcription_service import TranscriptionService
+
+# Import custom exceptions
+from exceptions import RedditPostError, VideoDownloadError, TranscriptionError
 
 # Load environment variables from .env if present
 try:
@@ -23,7 +33,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 if TYPE_CHECKING:
     pass
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Optional transcription support via faster-whisper (enabled with USE_WHISPER_TRANSCRIPTION=true)
@@ -46,6 +56,8 @@ class RedditClientManager:
     _instance = None
     _client = None
     _is_read_only = True
+    _last_init_time = 0
+    _init_cooldown = 60  # Cooldown period in seconds
 
     def __new__(cls) -> "RedditClientManager":
         if cls._instance is None:
@@ -55,6 +67,13 @@ class RedditClientManager:
 
     def _initialize_client(self) -> None:
         """Initialize the Reddit client with appropriate credentials."""
+        current_time = time.time()
+        if current_time - self._last_init_time < self._init_cooldown:
+            logger.info(f"Client initialization on cooldown. Waiting {self._init_cooldown} seconds between initializations.")
+            return
+            
+        self._last_init_time = current_time
+        
         client_id = getenv("REDDIT_CLIENT_ID")
         client_secret = getenv("REDDIT_CLIENT_SECRET")
         user_agent = getenv("REDDIT_USER_AGENT", "RedditMCPServer v1.0")
@@ -117,6 +136,11 @@ class RedditClientManager:
             logger.error(f"Error initializing Reddit client: {e}")
             self._client = None
 
+    def refresh_client(self) -> None:
+        """Force a refresh of the Reddit client."""
+        logger.info("Refreshing Reddit client.")
+        self._initialize_client()
+
     @property
     def client(self) -> Optional[praw.Reddit]:
         """Get the Reddit client instance."""
@@ -160,6 +184,11 @@ def require_write_access(func: F) -> F:
 
 mcp = FastMCP("Tiktok Reddit MCP")
 reddit_manager = RedditClientManager()
+
+# Initialize services
+reddit_service = RedditService()
+video_service = VideoService()
+transcription_service = TranscriptionService()
 
 def _format_timestamp(timestamp: float) -> str:
     """Convert Unix timestamp to human readable format.
@@ -251,6 +280,7 @@ def _find_submission_by_title(
 
 @require_write_access
 def create_post(
+    ctx: Any,
     subreddit: str,
     title: str,
     content: Optional[str] = None,
@@ -265,6 +295,7 @@ def create_post(
     """Create a new post in a subreddit.
 
     Args:
+        ctx: Context object for reporting progress.
         subreddit: Name of the subreddit to post in (with or without 'r/' prefix)
         title: Title of the post (max 300 characters)
         content: Content of the post (text for self posts, URL for link posts)
@@ -281,162 +312,29 @@ def create_post(
         ValueError: If input validation fails
         RuntimeError: For other errors during post creation
     """
-    manager = RedditClientManager()
-    if not manager.client:
-        raise RuntimeError("Reddit client not initialized")
-
-    # Input validation
-    if not subreddit or not isinstance(subreddit, str):
-        raise ValueError("Subreddit name is required")
-    if not title or not isinstance(title, str):
-        raise ValueError("Post title is required")
-    if len(title) > 300:
-        raise ValueError("Title must be 300 characters or less")
-    if not video_path and (not content or not isinstance(content, str)):
-        raise ValueError("Post content/URL is required for non-video posts")
-
-    clean_subreddit = subreddit[2:] if subreddit.startswith("r/") else subreddit
-
-    try:
-        logger.info(f"Creating post in r/{clean_subreddit}")
-        subreddit_obj = manager.client.subreddit(clean_subreddit)
-        _ = subreddit_obj.display_name
-
-        try:
-            if video_path:
-                # Log video file details before submission
-                if video_path and path.exists(video_path):
-                    try:
-                        file_size = path.getsize(video_path)
-                        logger.info(f"Attempting to submit video: {video_path}")
-                        logger.info(f"Video file size: {file_size} bytes")
-                    except Exception as log_error:
-                        logger.warning(f"Error getting video file size: {log_error}")
-                
-                submission = None
-                try:
-                    # PRAW's submit_video can sometimes return None if without_websockets is True
-                    # or if there's a WebSocketException.
-                    # The current implementation catches WebSocketException, but if it returns None,
-                    # it means the post might still be created on Reddit's side.
-                    submission = subreddit_obj.submit_video(
-                        title=title[:300],
-                        video_path=video_path,
-                        thumbnail_path=thumbnail_path,
-                        nsfw=nsfw,
-                        spoiler=spoiler,
-                        send_replies=True,
-                        flair_id=flair_id,
-                        flair_text=flair_text,
-                        # Set without_websockets to True to avoid WebSocketException
-                        # and handle the potential None return.
-                        without_websockets=True,
-                    )
-                except praw.exceptions.APIException as api_exc:
-                    logger.error(f"Reddit API error during video submission: {api_exc}", exc_info=True)
-                    raise RuntimeError(
-                        f"Failed to submit video due to Reddit API error: {api_exc}. "
-                        "This might indicate issues with video format, size, or subreddit settings."
-                    ) from api_exc
-                except requests.exceptions.RequestException as req_exc:
-                    logger.error(f"Network error during video submission: {req_exc}", exc_info=True)
-                    raise RuntimeError(
-                        f"Failed to submit video due to network error: {req_exc}. "
-                        "Please check your internet connection or try again later."
-                    ) from req_exc
-                except Exception as e:
-                    logger.error(f"An unexpected error occurred during video submission: {e}", exc_info=True)
-                    raise RuntimeError(
-                        f"An unexpected error occurred during video submission: {e}. "
-                        "Please check the video file and try again."
-                    ) from e
-                
-                if submission is None:
-                    logger.warning(
-                        "PRAW's submit_video returned None. Attempting to find the submission by title."
-                    )
-                    # Attempt to find the submission by title
-                    submission = _find_submission_by_title(subreddit_obj, title[:300])
-                    
-                    if submission is None:
-                        # If still None, then the post truly failed or is not immediately retrievable
-                        raise RuntimeError(
-                            "Video submission might have succeeded, but PRAW could not retrieve "
-                            "the submission object, and it could not be found by title. "
-                            "Please check the subreddit manually."
-                        )
-                    else:
-                        logger.info(f"Successfully retrieved submission by title: {submission.permalink}")
-            elif is_self:
-                submission = subreddit_obj.submit(
-                    title=title[:300],
-                    selftext=content,
-                    nsfw=nsfw,
-                    spoiler=spoiler,
-                    send_replies=True,
-                )
-            else:
-                if content and not content.startswith(("http://", "https://")):
-                    content = f"https://{content}"
-                submission = subreddit_obj.submit(
-                    title=title[:300],
-                    url=content,
-                    nsfw=nsfw,
-                    spoiler=spoiler,
-                    send_replies=True,
-                )
-            
-            # Apply flair if provided for any post type
-            if (flair_id or flair_text):
-                try:
-                    # Only attempt to flair if submission object is valid
-                    if submission:
-                        submission.mod.flair(flair_template_id=flair_id, text=flair_text)
-                        logger.info(f"Applied flair to post {submission.id}: ID={flair_id}, Text='{flair_text}'")
-                except Exception as flair_error:
-                    logger.warning(f"Failed to apply flair to post {submission.id}: {flair_error}")
-
-            logger.info(f"Post created successfully: {submission.permalink}")
-
-            return {
-                "post": _format_post(submission),
-                "metadata": {
-                    "created_at": _format_timestamp(time.time()),
-                    "subreddit": clean_subreddit,
-                    "is_self_post": is_self,
-                    "permalink": f"https://reddit.com{submission.permalink}",
-                    "id": submission.id,
-                },
-            }
-
-        except Exception as post_error:
-            logger.error(f"Failed to create post in r/{clean_subreddit}: {post_error}", exc_info=True) # Log full traceback
-            # Check for specific error messages related to video uploads
-            error_message = str(post_error)
-            if "NO_VIDEOS" in error_message:
-                raise ValueError(f"Failed to create post: This community does not allow videos. Original error: {error_message}") from post_error
-            elif "Websocket error" in error_message or "MEDIA_UPLOAD_FAILED" in error_message:
-                raise RuntimeError(
-                    f"Failed to create post: {error_message}. This often indicates an issue with the video file "
-                    f"(e.g., corrupted, unsupported format, too large) or a temporary Reddit media server problem. "
-                    f"Your post may still have been created and be awaiting moderation. Please check the video file "
-                    f"and try again if necessary."
-                ) from post_error
-            else:
-                raise RuntimeError(f"Failed to create post: {post_error}. Please check subreddit name, title, and content.") from post_error
- 
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during post creation for r/{clean_subreddit}: {e}", exc_info=True) # Log full traceback
-        raise RuntimeError(f"An unexpected error occurred during post creation: {e}") from e
+    return reddit_service.create_post(
+        ctx=ctx,
+        subreddit=subreddit,
+        title=title,
+        content=content,
+        is_self=is_self,
+        video_path=video_path,
+        thumbnail_path=thumbnail_path,
+        nsfw=nsfw,
+        spoiler=spoiler,
+        flair_id=flair_id,
+        flair_text=flair_text,
+    )
 
 
 @require_write_access
 def reply_to_post(
-    post_id: str, content: str, subreddit: Optional[str] = None
+    ctx: Any, post_id: str, content: str, subreddit: Optional[str] = None
 ) -> Dict[str, Any]:
     """Post a reply to an existing Reddit post.
 
     Args:
+        ctx: Context object for reporting progress.
         post_id: The ID of the post to reply to (can be full URL, permalink, or just ID)
         content: The content of the reply (1-10000 characters)
         subreddit: The subreddit name if known (for validation, with or without 'r/' prefix)
@@ -448,75 +346,19 @@ def reply_to_post(
         ValueError: If input validation fails or post is not found
         RuntimeError: For other errors during reply creation
     """
-    manager = RedditClientManager()
-    if not manager.client:
-        raise RuntimeError("Reddit client not initialized")
-
-    if not post_id or not isinstance(post_id, str):
-        raise ValueError("Post ID is required")
-    if not content or not isinstance(content, str):
-        raise ValueError("Reply content is required")
-    if len(content) < 1 or len(content) > 10000:
-        raise ValueError("Reply must be between 1 and 10000 characters")
-
-    clean_subreddit = None
-    if subreddit:
-        if not isinstance(subreddit, str):
-            raise ValueError("Subreddit name must be a string")
-        clean_subreddit = subreddit[2:] if subreddit.startswith("r/") else subreddit
-
-    try:
-        clean_post_id = _extract_reddit_id(post_id)
-        logger.info(f"Creating reply to post ID: {clean_post_id}")
-
-        submission = manager.client.submission(id=clean_post_id)
-
-        try:
-            post_title = submission.title
-            post_subreddit = submission.subreddit
-
-            logger.info(
-                f"Replying to post: "
-                f"Title: {post_title}, "
-                f"Subreddit: r/{post_subreddit.display_name}"
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to access post {clean_post_id}: {e}")
-            raise ValueError(f"Post {clean_post_id} not found or inaccessible") from e
-
-        if (
-            clean_subreddit
-            and post_subreddit.display_name.lower() != clean_subreddit.lower()
-        ):
-            raise ValueError(
-                f"Post is in r/{post_subreddit.display_name}, not r/{clean_subreddit}"
-            )
-
-        try:
-            reply = submission.reply(content)
-            logger.info(f"Reply created successfully: {reply.permalink}")
-
-            return {
-                "reply_id": reply.id,
-                "reply_permalink": f"https://reddit.com{reply.permalink}",
-                "parent_post_id": submission.id,
-                "parent_post_title": submission.title,
-            }
-
-        except Exception as reply_error:
-            logger.error(f"Failed to create reply to post {clean_post_id}: {reply_error}")
-            raise RuntimeError(f"Failed to create reply: {reply_error}. Please check content and permissions.") from reply_error
-
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while replying to post {post_id}: {e}")
-        raise RuntimeError(f"An unexpected error occurred while replying to post: {e}") from e
+    return reddit_service.reply_to_post(
+        ctx=ctx,
+        post_id=post_id,
+        content=content,
+        subreddit=subreddit,
+    )
 
 @mcp.tool()
-def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
+def download_tiktok_video(ctx: Any, url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
     """Download a TikTok video using yt-dlp (thumbnail discarded immediately).
 
     Args:
+        ctx: Context object for reporting progress.
         url: TikTok video URL (short or full)
         download_folder: Destination folder
         keep: If False, video will be deleted after returning metadata
@@ -524,61 +366,12 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
     Returns:
         Dict with video_id, video_path (may be deleted later), thumbnail_deleted flag
     """
-    if not path.exists(download_folder):
-        makedirs(download_folder)
-
-# Check and update yt-dlp to latest version
-    try:
-        import subprocess
-        import sys
-        logger.info("Checking for yt-dlp updates...")
-        result = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"], 
-                               capture_output=True, text=True, timeout=60)
-        if result.returncode == 0:
-            logger.info("yt-dlp is up to date")
-        else:
-            logger.warning(f"Failed to update yt-dlp: {result.stderr}")
-    except Exception as e:
-        logger.warning(f"Error checking for yt-dlp updates: {e}")
-    # Progress tracking variables
-    last_reported_progress = 0
-    
-    def progress_hook(d):
-        """Progress hook for yt-dlp to report download status."""
-        nonlocal last_reported_progress
-        
-        if d['status'] == 'downloading':
-            # Calculate percentage completion
-            if d.get('total_bytes') and d.get('downloaded_bytes'):
-                percentage = (d['downloaded_bytes'] / d['total_bytes']) * 100
-            elif d.get('total_bytes_estimate') and d.get('downloaded_bytes'):
-                percentage = (d['downloaded_bytes'] / d['total_bytes_estimate']) * 100
-            else:
-                percentage = 0
-            
-            # Report progress every 10% or at start/end
-            if (percentage >= last_reported_progress + 10 or
-                (last_reported_progress == 0 and percentage > 0) or
-                percentage >= 100):
-                last_reported_progress = (percentage // 10) * 10  # Round down to nearest 10
-                
-                # Format progress message
-                downloaded_mb = d['downloaded_bytes'] / (1024 * 1024) if d.get('downloaded_bytes') else 0
-                total_mb = (d['total_bytes'] or d['total_bytes_estimate'] or 0) / (1024 * 1024) if (d.get('total_bytes') or d.get('total_bytes_estimate')) else 0
-                
-                # Log progress for LLM to monitor
-                logger.info(f"Download progress: {percentage:.1f}% ({downloaded_mb:.1f}MB/{total_mb:.1f}MB)")
-                
-                # Additional info if available
-                if d.get('eta') is not None:
-                    logger.info(f"Estimated time remaining: {d['eta']} seconds")
-                if d.get('speed') is not None:
-                    speed_kbps = d['speed'] / 1024
-                    logger.info(f"Download speed: {speed_kbps:.1f} KB/s")
-        elif d['status'] == 'finished':
-            logger.info("Download completed, processing video...")
-        elif d['status'] == 'error':
-            logger.error(f"Download error: {d.get('errmsg', 'Unknown error')}")
+    return video_service.download_tiktok_video(
+        ctx=ctx,
+        url=url,
+        download_folder=download_folder,
+        keep=keep
+    )
 
     original_url = url
     if any(host in url for host in ("vm.tiktok.com", "vt.tiktok.com")):
@@ -588,7 +381,8 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
             url = head.url
         except Exception as e:
             raise RuntimeError(f"Failed to resolve short TikTok link: {e}") from e
-# Check if video already exists locally
+
+    # Check if video already exists locally
     try:
         # Extract video ID from URL for pre-check
         video_id_from_url = None
@@ -674,63 +468,33 @@ def download_tiktok_video(url: str, download_folder: str = "downloaded", keep: b
             pass
     
     # Log completion message for LLM to monitor
-# Log completion message for LLM to monitor
     logger.info(f"Download completed successfully. Video ID: {video_id}")
     logger.info(f"Video available at: {video_path}")
     logger.info(f"Returning result: {result}")
     return result
 
 @mcp.tool()
-def transcribe_video(video_path: str, model_size: str = "small") -> Dict[str, Any]:
+def transcribe_video(ctx: Any, video_path: str, model_size: str = "small") -> Dict[str, Any]:
     """Transcribe a downloaded video using faster-whisper if enabled.
 
     Args:
+        ctx: Context object for reporting progress.
         video_path: Path to local video file
         model_size: Whisper model size (tiny, base, small, medium, large-v3)
 
     Returns:
         Dict with transcript and segments. If transcription disabled, returns message.
     """
-    if not path.exists(video_path):
-        raise ValueError("Video path does not exist")
-
-    if not USE_WHISPER:
-        return { 'status': 'disabled', 'message': 'Whisper transcription disabled. Set USE_WHISPER_TRANSCRIPTION=true to enable.' }
-
-    try:
-        if model_size not in ("tiny", "base", "small", "medium", "large-v3"):
-            model_size = "small"
-        if model_size not in _whisper_models:
-            logger.info(f"Loading whisper model: {model_size}")
-            _whisper_models[model_size] = WhisperModel(model_size, compute_type="auto")
-        model = _whisper_models[model_size]
-        segments_iter, info = model.transcribe(video_path, beam_size=1)
-        segments = []
-        full_text_parts = []
-        for seg in segments_iter:
-            segments.append({
-                'id': seg.id,
-                'start': seg.start,
-                'end': seg.end,
-                'text': seg.text.strip(),
-            })
-            full_text_parts.append(seg.text.strip())
-        transcript = " ".join(full_text_parts)
-        logger.info(f"Video transcription completed successfully. Language: {info.language}, Duration: {info.duration:.2f} seconds.")
-        return {
-            'status': 'success',
-            'language': info.language,
-            'duration': info.duration,
-            'segments': segments,
-            'transcript': transcript,
-        }
-    except Exception as e:
-        logger.error(f"Failed to transcribe video: {e}")
-        raise RuntimeError(f"Failed to transcribe video: {e}") from e
+    return transcription_service.transcribe_video(
+        ctx=ctx,
+        video_path=video_path,
+        model_size=model_size
+    )
 
 @mcp.tool()
 @require_write_access
 def post_downloaded_video(
+    ctx: Any,
     video_path: Optional[str] = None,
     subreddit: str = "",
     title: str = "",
@@ -794,8 +558,26 @@ def post_downloaded_video(
         subreddit_details = get_subreddit_details(subreddit)
         if not subreddit_details.get("video_post_allowed", False):
             raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
-            
+    
+    # Pre-submission video file validation
+    if video_path:
+        if not os.path.exists(video_path):
+            raise ValueError(f"Video file does not exist: {video_path}")
+        
+        # Check file size (Reddit has a 1GB limit for videos)
+        max_size_bytes = 1 * 1024 * 1024 * 1024  # 1 GB
+        try:
+            file_size = os.path.getsize(video_path)
+            if file_size > max_size_bytes:
+                raise ValueError(f"Video file is too large ({file_size} bytes). Maximum allowed size is {max_size_bytes} bytes (1GB).")
+            logger.info(f"Video file size is valid: {file_size} bytes")
+        except OSError as e:
+            logger.warning(f"Could not determine file size for {video_path}: {e}")
+            # We'll proceed anyway, as Reddit might give a more informative error
+    
+    ctx.report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
     post_info = create_post(
+        ctx=ctx,
         subreddit=subreddit,
         title=title,
         video_path=video_path,
@@ -805,10 +587,13 @@ def post_downloaded_video(
         flair_id=flair_id,
         flair_text=flair_text,
     )
+    ctx.report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
     result: Dict[str, Any] = { 'post': post_info, 'used_video_path': video_path }
     if comment:
+        ctx.report_progress({"status": "posting_video", "message": "Adding comment to post..."})
         post_id = post_info['metadata']['id']
-        reply = reply_to_post(post_id=post_id, content=comment)
+        reply = reply_to_post(ctx=ctx, post_id=post_id, content=comment)
+        ctx.report_progress({"status": "posting_video", "message": "Comment added."})
         result['comment'] = reply
         result['comment_language'] = lang
         result['auto_comment_generated'] = auto_generated
