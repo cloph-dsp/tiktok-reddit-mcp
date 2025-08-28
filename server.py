@@ -18,6 +18,15 @@ from reddit_service import RedditService
 from video_service import VideoService
 from transcription_service import TranscriptionService
 
+# Import utility functions
+from utils import _format_timestamp, _format_post, _extract_reddit_id, _find_submission_by_title
+
+# Import Reddit client manager
+from reddit_client import RedditClientManager
+
+# Import whisper configuration
+from whisper_config import USE_WHISPER, WhisperModel, _whisper_models
+
 # Import custom exceptions
 from exceptions import RedditPostError, VideoDownloadError, TranscriptionError
 
@@ -35,131 +44,6 @@ if TYPE_CHECKING:
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# Optional transcription support via faster-whisper (enabled with USE_WHISPER_TRANSCRIPTION=true)
-USE_WHISPER = getenv("USE_WHISPER_TRANSCRIPTION", "false").lower() in ("1", "true", "yes", "on")
-try:
-    if USE_WHISPER:
-        from faster_whisper import WhisperModel  # type: ignore
-        _whisper_models = {}
-    else:
-        WhisperModel = None  # type: ignore
-except Exception as _imp_err:  # pragma: no cover
-    logger.warning(f"Disabling whisper transcription (import error): {_imp_err}")
-    USE_WHISPER = False
-    WhisperModel = None  # type: ignore
-
-
-class RedditClientManager:
-    """Manages the Reddit client and its state."""
-
-    _instance = None
-    _client = None
-    _is_read_only = True
-    _last_init_time = 0
-    _init_cooldown = 60  # Cooldown period in seconds
-
-    def __new__(cls) -> "RedditClientManager":
-        if cls._instance is None:
-            cls._instance = super(RedditClientManager, cls).__new__(cls)
-            cls._instance._initialize_client()
-        return cls._instance
-
-    def _initialize_client(self) -> None:
-        """Initialize the Reddit client with appropriate credentials."""
-        current_time = time.time()
-        if current_time - self._last_init_time < self._init_cooldown:
-            logger.info(f"Client initialization on cooldown. Waiting {self._init_cooldown} seconds between initializations.")
-            return
-            
-        self._last_init_time = current_time
-        
-        client_id = getenv("REDDIT_CLIENT_ID")
-        client_secret = getenv("REDDIT_CLIENT_SECRET")
-        user_agent = getenv("REDDIT_USER_AGENT", "RedditMCPServer v1.0")
-        username = getenv("REDDIT_USERNAME")
-        password = getenv("REDDIT_PASSWORD")
-
-        self._is_read_only = True
-
-        try:
-            # Try authenticated access first if credentials are provided
-            if all([username, password, client_id, client_secret]):
-                logger.info(
-                    f"Attempting to initialize Reddit client with user authentication for u/{username}"
-                )
-                try:
-                    self._client = praw.Reddit(
-                        client_id=client_id,
-                        client_secret=client_secret,
-                        user_agent=user_agent,
-                        username=username,
-                        password=password,
-                        check_for_updates=False,
-                    )
-                    # Test authentication
-                    if self._client.user.me() is None:
-                        raise ValueError(f"Failed to authenticate as u/{username}")
-
-                    logger.info(f"Successfully authenticated as u/{username}")
-                    self._is_read_only = False
-                    return
-                except Exception as auth_error:
-                    logger.warning(f"Authentication failed: {auth_error}")
-                    logger.info("Falling back to read-only access")
-
-            # Fall back to read-only with client credentials
-            if client_id and client_secret:
-                logger.info("Initializing Reddit client with read-only access")
-                self._client = praw.Reddit(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    user_agent=user_agent,
-                    check_for_updates=False,
-                    read_only=True,
-                )
-                return
-
-            # Last resort: read-only without credentials
-            logger.info(
-                "Initializing Reddit client in read-only mode without credentials"
-            )
-            self._client = praw.Reddit(
-                user_agent=user_agent,
-                check_for_updates=False,
-                read_only=True,
-            )
-            # Test read-only access
-            self._client.subreddit("popular").hot(limit=1)
-
-        except Exception as e:
-            logger.error(f"Error initializing Reddit client: {e}")
-            self._client = None
-
-    def refresh_client(self) -> None:
-        """Force a refresh of the Reddit client."""
-        logger.info("Refreshing Reddit client.")
-        self._initialize_client()
-
-    @property
-    def client(self) -> Optional[praw.Reddit]:
-        """Get the Reddit client instance."""
-        return self._client
-
-    @property
-    def is_read_only(self) -> bool:
-        """Check if the client is in read-only mode."""
-        return self._is_read_only
-
-    def check_user_auth(self) -> bool:
-        """Check if user authentication is available for write operations."""
-        if not self._client:
-            logger.error("Reddit client not initialized")
-            return False
-        if self._is_read_only:
-            logger.error("Reddit client is in read-only mode")
-            return False
-        return True
 
 
 def require_write_access(func: F) -> F:
@@ -189,95 +73,6 @@ reddit_manager = RedditClientManager()
 reddit_service = RedditService()
 video_service = VideoService()
 transcription_service = TranscriptionService()
-
-def _format_timestamp(timestamp: float) -> str:
-    """Convert Unix timestamp to human readable format.
-
-    Args:
-        timestamp (float): Unix timestamp
-
-    Returns:
-        str: Formatted date string
-    """
-    try:
-        dt = datetime.fromtimestamp(timestamp)
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-    except Exception:
-        return str(timestamp)
-
-def _format_post(post: praw.models.Submission) -> str:
-    """Format post information."""
-    content_type = "Text Post" if post.is_self else "Link Post"
-    content = post.selftext if post.is_self else post.url
-
-    return f"""
-        • Title: {post.title}
-        • Type: {content_type}
-        • Content: {content}
-        • Author: u/{str(post.author)}
-        • Subreddit: r/{str(post.subreddit)}
-        • Stats:
-        - Score: {post.score:,}
-        - Upvote Ratio: {post.upvote_ratio * 100:.1f}%
-        - Comments: {post.num_comments:,}
-        • Metadata:
-        - Posted: {_format_timestamp(post.created_utc)}
-        • Links:
-        - Full Post: https://reddit.com{post.permalink}
-        - Short Link: https://redd.it/{post.id}
-        """
-
-def _extract_reddit_id(reddit_id: str) -> str:
-    """Extract the base ID from a Reddit URL or ID.
-
-    Args:
-        reddit_id: Either a Reddit ID or a URL containing the ID
-
-    Returns:
-        The extracted Reddit ID
-    """
-    if not reddit_id:
-        raise ValueError("Empty ID provided")
-
-    if "/" in reddit_id:
-        parts = [p for p in reddit_id.split("/") if p]
-        reddit_id = parts[-1]
-        logger.debug(f"Extracted ID {reddit_id} from URL")
-
-    return reddit_id
-
-
-def _find_submission_by_title(
-    subreddit_obj: praw.models.Subreddit, title: str, max_age_seconds: int = 300
-) -> Optional[praw.models.Submission]:
-    """Attempt to find a submission by title in a given subreddit within a time window.
-
-    Args:
-        subreddit_obj: The PRAW Subreddit object to search within.
-        title: The title of the post to search for.
-        max_age_seconds: Maximum age of the post in seconds to consider (default: 5 minutes).
-
-    Returns:
-        The praw.models.Submission object if found, otherwise None.
-    """
-    logger.info(f"Attempting to find submission by title '{title}' in r/{subreddit_obj.display_name}")
-    search_time = time.time() - max_age_seconds
-    
-    # Search in new and hot for recent posts
-    for submission in subreddit_obj.new(limit=10): # Check up to 10 new posts
-        if submission.created_utc > search_time and submission.title == title:
-            logger.info(f"Found new submission by title: {submission.permalink}")
-            return submission
-    
-    for submission in subreddit_obj.hot(limit=10): # Check up to 10 hot posts
-        if submission.created_utc > search_time and submission.title == title:
-            logger.info(f"Found hot submission by title: {submission.permalink}")
-            return submission
-            
-    logger.info(f"No recent submission found with title '{title}' in r/{subreddit_obj.display_name}")
-    return None
-
-
 @require_write_access
 def create_post(
     ctx: Any,
@@ -356,13 +151,13 @@ def reply_to_post(
 @mcp.tool()
 def download_tiktok_video(ctx: Any, url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
     """Download a TikTok video using yt-dlp (thumbnail discarded immediately).
-
+ 
     Args:
         ctx: Context object for reporting progress.
         url: TikTok video URL (short or full)
         download_folder: Destination folder
         keep: If False, video will be deleted after returning metadata
-
+ 
     Returns:
         Dict with video_id, video_path (may be deleted later), thumbnail_deleted flag
     """
@@ -372,106 +167,6 @@ def download_tiktok_video(ctx: Any, url: str, download_folder: str = "downloaded
         download_folder=download_folder,
         keep=keep
     )
-
-    original_url = url
-    if any(host in url for host in ("vm.tiktok.com", "vt.tiktok.com")):
-        try:
-            head = requests.head(url, allow_redirects=True, timeout=10)
-            head.raise_for_status()
-            url = head.url
-        except Exception as e:
-            raise RuntimeError(f"Failed to resolve short TikTok link: {e}") from e
-
-    # Check if video already exists locally
-    try:
-        # Extract video ID from URL for pre-check
-        video_id_from_url = None
-        if "/video/" in url:
-            # Extract ID from TikTok URL like https://www.tiktok.com/@user/video/123456789123456789
-            parts = url.split("/video/")
-            if len(parts) > 1:
-                video_id_from_url = parts[1].split("?")[0]  # Remove query parameters if any
-        
-        # Check if a file with this ID already exists in the download folder
-        if video_id_from_url:
-            # Check for common video extensions
-            for ext in ('.mp4', '.mov', '.mkv', '.webm', '.avi', '.flv'):
-                existing_file = path.join(download_folder, f"{video_id_from_url}{ext}")
-                if path.exists(existing_file):
-                    logger.info(f"Video {video_id_from_url} already exists locally: {existing_file}")
-                    # Return result indicating video is already available
-                    result = {
-                        'original_url': original_url,
-                        'resolved_url': url,
-                        'video_id': video_id_from_url,
-                        'video_path': existing_file,
-                        'thumbnail_deleted': True,  # Assume thumbnail was deleted previously
-                        'kept': keep,
-                        'already_exists': True,
-                        'message': f'Video {video_id_from_url} already exists locally'
-                    }
-                    logger.info(f"Video already exists. Returning result: {result}")
-                    return result
-    except Exception as e:
-        logger.warning(f"Error during pre-download check: {e}")
-
-    output_template = path.join(download_folder, '%(id)s.%(ext)s')
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'format': 'best[ext=mp4]/best',
-        'outtmpl': output_template,
-        'writethumbnail': True,
-        'progress_hooks': [progress_hook],  # Add progress hook
-    }
-
-    video_path = None
-    video_id = None
-    thumbnail_deleted = False
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_id = info.get('id')
-            video_path = ydl.prepare_filename(info)
-            base_filename, _ = path.splitext(video_path)
-            # Locate and immediately delete thumbnail (not retained)
-            for ext in ('.jpg', '.webp', '.png', '.image'):
-                pth = base_filename + ext
-                if path.exists(pth):
-                    try:
-                        remove(pth)
-                        thumbnail_deleted = True
-                    except Exception:
-                        pass
-                    break
-    except yt_dlp.utils.DownloadError as e:
-        logger.error(f"yt-dlp download error: {e}")
-        raise RuntimeError(f"Failed to download TikTok video: {e}. This might be due to an invalid URL, geo-restrictions, or changes in TikTok's website. Please check the URL and try again.") from e
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during download: {e}")
-        raise RuntimeError(f"An unexpected error occurred during TikTok video download: {e}") from e
-
-    result = {
-        'original_url': original_url,
-        'resolved_url': url,
-        'video_id': video_id,
-        'video_path': video_path,
-        'thumbnail_deleted': thumbnail_deleted,
-        'kept': keep,
-    }
-
-    if not keep and video_path and path.exists(video_path):
-        try:
-            remove(video_path)
-            result['kept'] = False
-        except Exception:
-            pass
-    
-    # Log completion message for LLM to monitor
-    logger.info(f"Download completed successfully. Video ID: {video_id}")
-    logger.info(f"Video available at: {video_path}")
-    logger.info(f"Returning result: {result}")
-    return result
 
 @mcp.tool()
 def transcribe_video(ctx: Any, video_path: str, model_size: str = "small") -> Dict[str, Any]:

@@ -6,13 +6,13 @@ from os import getenv, path, remove
 from typing import Any, Dict, List, Optional
 import praw  # type: ignore
 import requests
-from server import (
+from utils import (
     _format_timestamp,
     _format_post,
     _extract_reddit_id,
     _find_submission_by_title,
-    RedditClientManager,
 )
+from reddit_client import RedditClientManager
 
 # Import custom exceptions
 from exceptions import RedditPostError

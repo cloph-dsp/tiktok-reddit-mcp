@@ -6,7 +6,7 @@ from typing import Any, Dict
 from exceptions import TranscriptionError
 
 # Optional transcription support via faster-whisper (enabled with USE_WHISPER_TRANSCRIPTION=true)
-from server import USE_WHISPER, WhisperModel, _whisper_models
+from whisper_config import USE_WHISPER, WhisperModel, _whisper_models
 
 logger = logging.getLogger(__name__)
 
