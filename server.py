@@ -270,31 +270,43 @@ def post_downloaded_video(
             logger.warning(f"Could not determine file size for {video_path}: {e}")
             # We'll proceed anyway, as Reddit might give a more informative error
     
+    # Check if ctx has the report_progress attribute
+    if not hasattr(ctx, 'report_progress'):
+        logger.warning("ctx object does not have report_progress attribute. Creating a dummy function.")
+        def report_progress(data: Dict[str, Any]) -> None:
+            logger.info(f"Dummy report_progress called with: {data}")
+        ctx.report_progress = report_progress
+
     ctx.report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
-    post_info = create_post(
-        ctx=ctx,
-        subreddit=subreddit,
-        title=title,
-        video_path=video_path,
-        thumbnail_path=thumbnail_path if thumbnail_path and path.exists(thumbnail_path) else None,
-        nsfw=nsfw,
-        spoiler=spoiler,
-        flair_id=flair_id,
-        flair_text=flair_text,
-    )
-    ctx.report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
-    result: Dict[str, Any] = { 'post': post_info, 'used_video_path': video_path }
-    if comment:
-        ctx.report_progress({"status": "posting_video", "message": "Adding comment to post..."})
-        post_id = post_info['metadata']['id']
-        reply = reply_to_post(ctx=ctx, post_id=post_id, content=comment)
-        ctx.report_progress({"status": "posting_video", "message": "Comment added."})
-        result['comment'] = reply
-        result['comment_language'] = lang
-        result['auto_comment_generated'] = auto_generated
-    else:
-        result['comment_language'] = None
-        result['auto_comment_generated'] = False
+    try:
+        post_info = create_post(
+            ctx=ctx,
+            subreddit=subreddit,
+            title=title,
+            video_path=video_path,
+            thumbnail_path=thumbnail_path if thumbnail_path and path.exists(thumbnail_path) else None,
+            nsfw=nsfw,
+            spoiler=spoiler,
+            flair_id=flair_id,
+            flair_text=flair_text,
+        )
+        ctx.report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
+        result: Dict[str, Any] = { 'post': post_info, 'used_video_path': video_path }
+        if comment:
+            ctx.report_progress({"status": "posting_video", "message": "Adding comment to post..."})
+            post_id = post_info['metadata']['id']
+            reply = reply_to_post(ctx=ctx, post_id=post_id, content=comment)
+            ctx.report_progress({"status": "posting_video", "message": "Comment added."})
+            result['comment'] = reply
+            result['comment_language'] = lang
+            result['auto_comment_generated'] = auto_generated
+        else:
+            result['comment_language'] = None
+            result['auto_comment_generated'] = False
+
+    except Exception as e:
+        logger.error(f"Error creating post: {e}")
+        raise
 
     # Attempt deletion after successful post/comment
     deleted = False
@@ -561,7 +573,7 @@ def get_subreddit_details(subreddit_name: str) -> Dict[str, Any]:
         if not sub_info["video_post_allowed"]:
             logger.info(f"Subreddit r/{clean_subreddit_name} does not allow video posts based on rules. "
                         f"Subreddit object attributes: {sub.__dict__}")
-
+ 
         logger.info(f"Successfully fetched details for r/{clean_subreddit_name}")
         return sub_info
  
