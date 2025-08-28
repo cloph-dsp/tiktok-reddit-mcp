@@ -251,9 +251,23 @@ def post_downloaded_video(
 
     # Check subreddit video posting allowance before attempting to post
     if video_path:
-        subreddit_details = asyncio.run(reddit_service.get_subreddit_details(subreddit))
-        if not subreddit_details.get("video_post_allowed", False):
-            raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
+        # Use the existing event loop if one is running, otherwise create a new one
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            own_loop = True
+        else:
+            own_loop = False
+        
+        try:
+            subreddit_details = loop.run_until_complete(reddit_service.get_subreddit_details(subreddit))
+            if not subreddit_details.get("video_post_allowed", False):
+                raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
+        finally:
+            if own_loop:
+                loop.close()
     
     # Pre-submission video file validation
     if video_path:
@@ -271,9 +285,15 @@ def post_downloaded_video(
             logger.warning(f"Could not determine file size for {video_path}: {e}")
             # We'll proceed anyway, as Reddit might give a more informative error
     
-    # Create an event loop and run the async function
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # Use the existing event loop if one is running, otherwise create a new one
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        own_loop = True
+    else:
+        own_loop = False
     
     try:
         result = loop.run_until_complete(_post_downloaded_video_async(
@@ -295,7 +315,8 @@ def post_downloaded_video(
         ))
         return result
     finally:
-        loop.close()
+        if own_loop:
+            loop.close()
 
 
 # Helper async function that contains the actual implementation
