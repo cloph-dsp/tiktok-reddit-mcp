@@ -189,7 +189,7 @@ async def transcribe_video(ctx: Any, video_path: str, model_size: str = "small")
 
 @mcp.tool()
 @require_write_access
-def post_downloaded_video(
+async def post_downloaded_video(
     ctx: Any,
     video_path: Optional[str] = None,
     subreddit: str = "",
@@ -220,13 +220,7 @@ def post_downloaded_video(
       both -> "Original link / link original: <url>"
     """
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    try:
-        return loop.run_until_complete(_post_downloaded_video_async(
+        return await _post_downloaded_video_async(
             ctx=ctx,
             video_path=video_path,
             subreddit=subreddit,
@@ -242,7 +236,7 @@ def post_downloaded_video(
             auto_comment=auto_comment,
             video_id=video_id,
             download_folder=download_folder
-        ))
+        )
     except Exception as e:
         logger.error(f"Error in post_downloaded_video: {e}")
         raise
