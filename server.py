@@ -315,6 +315,8 @@ async def _post_downloaded_video_async(
     # Check subreddit video posting allowance before attempting to post
     if video_path:
         subreddit_details = await reddit_service.get_subreddit_details(subreddit)
+        if subreddit_details is None:
+            raise ValueError("Could not retrieve subreddit details.")
         if not subreddit_details.get("video_post_allowed", False):
             raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
     
@@ -344,6 +346,8 @@ async def _post_downloaded_video_async(
     try:
         await report_progress({"status": "transcoding", "message": "Transcoding video to Reddit-safe format..."})
         transcoding_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
+        if transcoding_result is None:
+            raise ValueError("Could not transcode video.")
         transcoded_video_path = transcoding_result["transcoded_path"]
         transcoding_info = transcoding_result
         await report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
@@ -371,6 +375,8 @@ async def _post_downloaded_video_async(
         await report_progress({"status": "warning", "message": f"Thumbnail file does not exist: {thumbnail_path}"})
 
     try:
+        if transcoded_video_path is None:
+            raise ValueError("transcoded_video_path is None, cannot create post.")
         post_info = await create_post(
             ctx=ctx,
             subreddit=subreddit,
