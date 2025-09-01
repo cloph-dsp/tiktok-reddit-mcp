@@ -15,21 +15,21 @@ import os
 from mcp.server.fastmcp import FastMCP
 
 # Import services
-from .reddit_service import RedditService
-from .video_service import VideoService
-from .transcription_service import TranscriptionService
+from reddit_service import RedditService
+from video_service import VideoService
+from transcription_service import TranscriptionService
 
 # Import utility functions
-from .utils import _format_timestamp, _format_post, _extract_reddit_id, _find_submission_by_title
+from utils import _format_timestamp, _format_post, _extract_reddit_id, _find_submission_by_title
 
 # Import Reddit client manager
-from .reddit_client import RedditClientManager
+from reddit_client import RedditClientManager
 
 # Import whisper configuration
-from .whisper_config import USE_WHISPER, WhisperModel, _whisper_models
+from whisper_config import USE_WHISPER, WhisperModel, _whisper_models
 
 # Import custom exceptions
-from .exceptions import RedditPostError, VideoDownloadError, TranscriptionError
+from exceptions import RedditPostError, VideoDownloadError, TranscriptionError
 
 # Load environment variables from .env if present
 try:
