@@ -63,6 +63,7 @@ def require_write_access(func: F) -> F:
                 "Please provide valid REDDIT_USERNAME and REDDIT_PASSWORD environment variables."
             )
         result = func(*args, **kwargs)
+        # If result is a coroutine, await it; otherwise return it directly
         if asyncio.iscoroutine(result):
             result = await result
         return result
