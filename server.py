@@ -189,7 +189,7 @@ async def transcribe_video(ctx: Any, video_path: str, model_size: str = "small")
 
 @mcp.tool()
 @require_write_access
-def post_downloaded_video(
+async def post_downloaded_video(
     ctx: Any,
     video_path: Optional[str] = None,
     subreddit: str = "",
@@ -219,58 +219,23 @@ def post_downloaded_video(
       pt   -> "Link original: <url>"
       both -> "Original link / link original: <url>"
     """
-    try:
-        # Check if there's a running event loop
-        try:
-            loop = asyncio.get_running_loop()
-            # If we get here, a loop is running.
-            # We cannot use run_until_complete on a running loop.
-            # The correct approach would be to ensure this function is async,
-            # but since FastMCP seems to have issues with that, we'll try to work around it.
-            # This is a workaround: create a task and then run_until_complete on the task's result.
-            # This is not ideal and might still cause issues.
-            # The proper fix is to make this function async and ensure FastMCP awaits it.
-            future = asyncio.run_coroutine_threadsafe(_post_downloaded_video_async(
-                ctx=ctx,
-                video_path=video_path,
-                subreddit=subreddit,
-                title=title,
-                thumbnail_path=thumbnail_path,
-                nsfw=nsfw,
-                spoiler=spoiler,
-                flair_id=flair_id,
-                flair_text=flair_text,
-                comment=comment,
-                original_url=original_url,
-                comment_language=comment_language,
-                auto_comment=auto_comment,
-                video_id=video_id,
-                download_folder=download_folder
-            ), loop)
-            # This will block until the future is done
-            return future.result()
-        except RuntimeError:
-            # No running loop, use asyncio.run()
-            return asyncio.run(_post_downloaded_video_async(
-                ctx=ctx,
-                video_path=video_path,
-                subreddit=subreddit,
-                title=title,
-                thumbnail_path=thumbnail_path,
-                nsfw=nsfw,
-                spoiler=spoiler,
-                flair_id=flair_id,
-                flair_text=flair_text,
-                comment=comment,
-                original_url=original_url,
-                comment_language=comment_language,
-                auto_comment=auto_comment,
-                video_id=video_id,
-                download_folder=download_folder
-            ))
-    except Exception as e:
-        logger.error(f"Error in post_downloaded_video: {e}")
-        raise
+    return await _post_downloaded_video_async(
+        ctx=ctx,
+        video_path=video_path,
+        subreddit=subreddit,
+        title=title,
+        thumbnail_path=thumbnail_path,
+        nsfw=nsfw,
+        spoiler=spoiler,
+        flair_id=flair_id,
+        flair_text=flair_text,
+        comment=comment,
+        original_url=original_url,
+        comment_language=comment_language,
+        auto_comment=auto_comment,
+        video_id=video_id,
+        download_folder=download_folder
+    )
 
 async def _post_downloaded_video_async(
     ctx: Any,
