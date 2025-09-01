@@ -184,6 +184,8 @@ class RedditService:
             raise ValueError("Post content/URL is required for non-video posts")
 
         clean_subreddit = subreddit[2:] if subreddit.startswith("r/") else subreddit
+        
+        logger.info(f"create_post: subreddit={subreddit}, title={title}, video_path={video_path}, thumbnail_path={thumbnail_path}")
 
         try:
             logger.info(f"Creating post in r/{clean_subreddit}")

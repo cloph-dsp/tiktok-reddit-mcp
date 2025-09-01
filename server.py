@@ -62,10 +62,112 @@ def require_write_access(func: F) -> F:
                 "Authentication required for write operations. "
                 "Please provide valid REDDIT_USERNAME and REDDIT_PASSWORD environment variables."
             )
+        logger.info(f"require_write_access: Calling {func.__name__} with args={args}, kwargs={kwargs}")
         result = func(*args, **kwargs)
+        logger.info(f"require_write_access: {func.__name__} returned {result}")
         # If result is a coroutine, await it; otherwise return it directly
         if asyncio.iscoroutine(result):
+            logger.info(f"require_write_access: Awaiting coroutine {result}")
             result = await result
+            logger.info(f"require_write_access: Awaited result is {result}")
+        logger.info(f"_post_downloaded_video_async: Attempting to create Reddit post... video_path={video_path}, subreddit={subreddit}, title={title}")
+        await report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
+
+        # Transcode video to Reddit-safe format
+        transcoded_video_path = video_path
+        transcoding_info = None
+        try:
+            logger.info(f"_post_downloaded_video_async: video_path={video_path}")
+            await report_progress({"status": "transcoding", "message": "Preparing video for upload..."})
+            transcode_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
+            transcoded_video_path = transcode_result.get("transcoded_path")
+            logger.info(f"_post_downloaded_video_async: transcoded_video_path={transcoded_video_path}")
+            transcoding_info = transcode_result
+            report_progress({"status": "transcoding", "message": f"Video prepared for upload: {path.basename(transcoded_video_path)}"})
+        except Exception as e:
+            logger.warning(f"_post_downloaded_video_async: Failed to transcode video, using original: {e}")
+            report_progress({"status": "transcoding", "message": "Using original video for upload"})
+
+        # Validate thumbnail if provided
+        validated_thumbnail_path = None
+        if thumbnail_path and path.exists(thumbnail_path):
+            # Check if thumbnail has a valid extension
+            valid_extensions = {'.jpg', '.jpeg', '.png', '.webp'}
+            _, ext = path.splitext(thumbnail_path.lower())
+            if ext in valid_extensions:
+                validated_thumbnail_path = thumbnail_path
+            else:
+                logger.warning(f"_post_downloaded_video_async: Invalid thumbnail extension {ext}, skipping thumbnail")
+                report_progress({"status": "warning", "message": f"Invalid thumbnail extension {ext}, skipping thumbnail"})
+        elif thumbnail_path:
+            logger.warning(f"_post_downloaded_video_async: Thumbnail file does not exist: {thumbnail_path}")
+            report_progress({"status": "warning", "message": "Thumbnail file not found, skipping"})
+
+        try:
+            logger.info(f"_post_downloaded_video_async: Calling create_post with video_path={transcoded_video_path}, thumbnail_path={validated_thumbnail_path}, subreddit={subreddit}, title={title}")
+            post_info = None
+            post_info = await create_post(
+                ctx=ctx,
+                subreddit=subreddit,
+                title=title,
+                video_path=transcoded_video_path,
+                thumbnail_path=validated_thumbnail_path,
+                nsfw=nsfw,
+                spoiler=spoiler,
+                flair_id=flair_id,
+                flair_text=flair_text,
+            )
+            logger.info(f"_post_downloaded_video_async: create_post returned {post_info}")
+            if post_info and post_info.get('metadata') and post_info['metadata'].get('permalink'):
+                await report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
+            else:
+                logger.warning("_post_downloaded_video_async: create_post did not return a permalink")
+                report_progress({"status": "posting_video", "message": "Post created, but permalink is missing"})
+        result: Dict[str, Any] = {
+            'post': post_info,
+            'used_video_path': transcoded_video_path,
+            'original_video_path': video_path
+        }
+        
+        # Add transcoding info if available
+        if transcoding_info:
+            result['transcoding_info'] = transcoding_info
+            
+        if comment:
+            await report_progress({"status": "posting_video", "message": "Adding comment to post..."})
+            post_id = post_info['metadata']['id']
+            reply = await reply_to_post(ctx=ctx, post_id=post_id, content=comment)
+            await report_progress({"status": "posting_video", "message": "Comment added."})
+            result['comment'] = reply
+            result['comment_language'] = comment_language
+            result['auto_comment_generated'] = auto_comment and original_url and not comment
+        else:
+            result['comment_language'] = None
+            result['auto_comment_generated'] = False
+
+        # Attempt deletion after successful post/comment
+        deleted = False
+        try:
+            # Clean up transcoded file if it's different from original
+            if transcoded_video_path != video_path and path.exists(transcoded_video_path):
+                remove(transcoded_video_path)
+                logger.info(f"Deleted transcoded video: {transcoded_video_path}")
+            # Clean up original video file
+            if path.exists(video_path):
+                remove(video_path)
+                deleted = True
+                logger.info(f"Deleted original video: {video_path}")
+            # Clean up thumbnail if it exists
+            if thumbnail_path and path.exists(thumbnail_path):
+                try:
+                    remove(thumbnail_path)
+                    logger.info(f"Deleted thumbnail: {thumbnail_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete thumbnail {thumbnail_path}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to delete video or thumbnail after posting: {e}")
+        
+        logger.info(f"Video posted successfully to Reddit. Permalink: {result.get('post', {}).get('metadata', {}).get('permalink', 'N/A')}")
         return result
 
     return cast(F, wrapper)
