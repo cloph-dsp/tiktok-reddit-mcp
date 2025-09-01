@@ -269,6 +269,7 @@ async def _post_downloaded_video_async(
     video_path: Optional[str],
     subreddit: str,
     title: str,
+    
     thumbnail_path: Optional[str],
     nsfw: bool,
     spoiler: bool,
@@ -282,6 +283,7 @@ async def _post_downloaded_video_async(
     download_folder: str
 ) -> Dict[str, Any]:
     """Helper function to run the async part of post_downloaded_video."""
+    logger.info(f"_post_downloaded_video_async called with video_path={video_path}, subreddit={subreddit}, title={title}")
     # Resolve video path from id if needed
     if not video_path:
         if not video_id:
@@ -294,9 +296,10 @@ async def _post_downloaded_video_async(
                 break
         if not video_path or not path.exists(video_path):
             raise ValueError(f"Could not locate video for id {video_id} in '{download_folder}'")
-
+    logger.info(f"Video path resolved to {video_path}")
     if not path.exists(video_path):
         raise ValueError("Video path does not exist")
+    logger.info(f"Video exists at {video_path}")
 
     lang = comment_language.lower().strip()
     if lang not in ("en", "pt", "both"):
@@ -317,6 +320,7 @@ async def _post_downloaded_video_async(
         subreddit_details = await reddit_service.get_subreddit_details(subreddit)
         if subreddit_details is None:
             raise ValueError("Could not retrieve subreddit details.")
+        logger.info(f"Subreddit details retrieved: {subreddit_details}")
         if not subreddit_details.get("video_post_allowed", False):
             raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
     
@@ -351,6 +355,7 @@ async def _post_downloaded_video_async(
         transcoded_video_path = transcoding_result["transcoded_path"]
         transcoding_info = transcoding_result
         await report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
+        logger.info(f"Video transcoding result: {transcoding_result}")
         logger.info(f"Video transcoded to Reddit-safe format: {transcoded_video_path}")
     except Exception as e:
         logger.error(f"Error during video transcoding: {e}")
