@@ -246,23 +246,30 @@ async def post_downloaded_video(
       pt   -> "Link original: <url>"
       both -> "Original link / link original: <url>"
     """
-    return await _post_downloaded_video_async(
-        ctx=ctx,
-        video_path=video_path,
-        subreddit=subreddit,
-        title=title,
-        thumbnail_path=thumbnail_path,
-        nsfw=nsfw,
-        spoiler=spoiler,
-        flair_id=flair_id,
-        flair_text=flair_text,
-        comment=comment,
-        original_url=original_url,
-        comment_language=comment_language,
-        auto_comment=auto_comment,
-        video_id=video_id,
-        download_folder=download_folder
-    )
+    logger.info(f"post_downloaded_video called with video_path={video_path}, subreddit={subreddit}, title={title}")
+    try:
+        result = await _post_downloaded_video_async(
+            ctx=ctx,
+            video_path=video_path,
+            subreddit=subreddit,
+            title=title,
+            thumbnail_path=thumbnail_path,
+            nsfw=nsfw,
+            spoiler=spoiler,
+            flair_id=flair_id,
+            flair_text=flair_text,
+            comment=comment,
+            original_url=original_url,
+            comment_language=comment_language,
+            auto_comment=auto_comment,
+            video_id=video_id,
+            download_folder=download_folder
+        )
+        logger.info(f"post_downloaded_video result: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Error in post_downloaded_video: {e}", exc_info=True)
+        raise
 
 async def _post_downloaded_video_async(
     ctx: Any,
