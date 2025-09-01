@@ -271,13 +271,6 @@ async def post_downloaded_video(
     except Exception as e:
         logger.error(f"Error in post_downloaded_video: {e}", exc_info=True)
         raise
-    # Fallback return to prevent NoneType error in await expression for MCP tool
-    # This should not be reached under normal circumstances due to explicit returns/raises above
-    # It's a safeguard against _post_downloaded_video_async potentially returning None
-    return {
-        "status": "completed",
-        "message": "Video post tool executed successfully (unexpected completion path)."
-    }
 
 async def _post_downloaded_video_async(
     ctx: Any,
@@ -357,27 +350,27 @@ async def _post_downloaded_video_async(
     
     # Create standardized progress reporter
     report_progress = create_progress_reporter(ctx)
-    await report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
+    report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
 
     # Transcode video to Reddit-safe format
     transcoded_video_path = None
     transcoding_info = None
     try:
-        await report_progress({"status": "transcoding", "message": "Transcoding video to Reddit-safe format..."})
+        report_progress({"status": "transcoding", "message": "Transcoding video to Reddit-safe format..."})
         transcoding_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
         if transcoding_result is None:
             raise ValueError("Could not transcode video.")
         transcoded_video_path = transcoding_result["transcoded_path"]
         transcoding_info = transcoding_result
-        await report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
+        report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
         logger.info(f"Video transcoding result: {transcoding_result}")
         logger.info(f"Video transcoded to Reddit-safe format: {transcoded_video_path}")
     except Exception as e:
         logger.error(f"Error during video transcoding: {e}")
-        await report_progress({"status": "error", "message": f"Video transcoding failed: {e}"})
+        report_progress({"status": "error", "message": f"Video transcoding failed: {e}"})
         # If transcoding fails, we'll try to upload the original video
         transcoded_video_path = video_path
-        await report_progress({"status": "warning", "message": "Using original video file for upload (transcoding failed)"})
+        report_progress({"status": "warning", "message": "Using original video file for upload (transcoding failed)"})
 
     # Validate thumbnail if provided
     validated_thumbnail_path = None
@@ -389,10 +382,10 @@ async def _post_downloaded_video_async(
             validated_thumbnail_path = thumbnail_path
         else:
             logger.warning(f"Invalid thumbnail extension {ext}, skipping thumbnail")
-            await report_progress({"status": "warning", "message": f"Invalid thumbnail extension {ext}, skipping thumbnail"})
+            report_progress({"status": "warning", "message": f"Invalid thumbnail extension {ext}, skipping thumbnail"})
     elif thumbnail_path:
         logger.warning(f"Thumbnail file does not exist: {thumbnail_path}")
-        await report_progress({"status": "warning", "message": f"Thumbnail file does not exist: {thumbnail_path}"})
+        report_progress({"status": "warning", "message": f"Thumbnail file does not exist: {thumbnail_path}"})
 
     try:
         if transcoded_video_path is None:
@@ -408,7 +401,7 @@ async def _post_downloaded_video_async(
             flair_id=flair_id,
             flair_text=flair_text,
         )
-        await report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
+        report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
         result: Dict[str, Any] = {
             'post': post_info,
             'used_video_path': transcoded_video_path,
@@ -420,10 +413,10 @@ async def _post_downloaded_video_async(
             result['transcoding_info'] = transcoding_info
             
         if comment:
-            await report_progress({"status": "posting_video", "message": "Adding comment to post..."})
+            report_progress({"status": "posting_video", "message": "Adding comment to post..."})
             post_id = post_info['metadata']['id']
             reply = await reply_to_post(ctx=ctx, post_id=post_id, content=comment)
-            await report_progress({"status": "posting_video", "message": "Comment added."})
+            report_progress({"status": "posting_video", "message": "Comment added."})
             result['comment'] = reply
             result['comment_language'] = comment_language
             result['auto_comment_generated'] = auto_comment and original_url and not comment
