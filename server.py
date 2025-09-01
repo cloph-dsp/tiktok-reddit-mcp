@@ -376,3 +376,47 @@ async def _post_downloaded_video_async(
     except Exception as e:
         logger.error(f"Error in post_downloaded_video: {e}")
         raise
+
+
+# --- Server entrypoint ---
+if __name__ == "__main__":
+    import argparse, subprocess, sys, shutil, os as _os
+ 
+    parser = argparse.ArgumentParser(description="Run TikTok→Reddit MCP server")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8050)), help="Proxy HTTP port (mcpo)")
+    parser.add_argument("--host", type=str, default=os.getenv("HOST", "0.0.0.0"), help="Proxy host (mcpo)")
+    parser.add_argument("--no-proxy", action="store_true", help="Run raw MCP server (stdio) without mcpo HTTP proxy")
+    args = parser.parse_args()
+ 
+    # Child/raw mode: just run stdio MCP server
+    if args.no_proxy or os.getenv("MCPO_CHILD") == "1":
+        logger.info("Starting raw MCP stdio server (read_only=%s)", RedditClientManager().is_read_only)
+        try:
+            mcp.run()
+        except TypeError:
+            mcp.run()
+        sys.exit(0)
+ 
+    # Parent: launch mcpo with proper syntax: mcpo --host H --port P [--api-key K] -- python server.py --no-proxy
+    api_key = os.getenv("MCPO_API_KEY")
+    mcpo_path = shutil.which("mcpo")
+    if not mcpo_path:
+        logger.error("mcpo console script not found on PATH. Install with: pip install mcpo")
+        sys.exit(1)
+ 
+    server_script = _os.path.abspath(__file__)
+    server_cmd = [sys.executable, server_script, "--no-proxy"]
+ 
+    mcpo_cmd = [mcpo_path, "--host", args.host, "--port", str(args.port)]
+    if api_key:
+        mcpo_cmd += ["--api-key", api_key]
+    mcpo_cmd += ["--"] + server_cmd
+ 
+    logger.info("Launching mcpo proxy: %s", " ".join(mcpo_cmd))
+    # Mark child for clarity (not strictly needed because of --no-proxy flag)
+    env = os.environ.copy()
+    env["MCPO_CHILD"] = "1"
+    try:
+        subprocess.run(mcpo_cmd, env=env, check=True)
+    except subprocess.CalledProcessError as e:
+        logger.error("mcpo exited with code %s", e.returncode)
