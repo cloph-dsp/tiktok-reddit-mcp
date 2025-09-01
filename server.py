@@ -51,7 +51,7 @@ def require_write_access(func: F) -> F:
     """Decorator to ensure write access is available."""
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
         reddit_manager = RedditClientManager()
         if reddit_manager.is_read_only:
             raise ValueError(
@@ -62,7 +62,10 @@ def require_write_access(func: F) -> F:
                 "Authentication required for write operations. "
                 "Please provide valid REDDIT_USERNAME and REDDIT_PASSWORD environment variables."
             )
-        return func(*args, **kwargs)
+        result = func(*args, **kwargs)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result
 
     return cast(F, wrapper)
 
