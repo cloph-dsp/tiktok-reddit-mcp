@@ -186,6 +186,7 @@ class RedditService:
         clean_subreddit = subreddit[2:] if subreddit.startswith("r/") else subreddit
         
         logger.info(f"create_post: subreddit={subreddit}, title={title}, video_path={video_path}, thumbnail_path={thumbnail_path}")
+        logger.info(f"create_post: is_self={is_self}, content={content}, nsfw={nsfw}, spoiler={spoiler}, flair_id={flair_id}, flair_text={flair_text}")
 
         try:
             logger.info(f"Creating post in r/{clean_subreddit}")
