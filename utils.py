@@ -82,16 +82,26 @@ def _find_submission_by_title(
     logger.info(f"Attempting to find submission by title '{title}' in r/{subreddit_obj.display_name}")
     search_time = time.time() - max_age_seconds
     
-    # Search in new and hot for recent posts
-    for submission in subreddit_obj.new(limit=10): # Check up to 10 new posts
+    # Search in new posts first (most likely place for recent submissions)
+    for submission in subreddit_obj.new(limit=20): # Check up to 20 new posts
         if submission.created_utc > search_time and submission.title == title:
             logger.info(f"Found new submission by title: {submission.permalink}")
             return submission
     
-    for submission in subreddit_obj.hot(limit=10): # Check up to 10 hot posts
+    # Search in hot posts
+    for submission in subreddit_obj.hot(limit=20): # Check up to 20 hot posts
         if submission.created_utc > search_time and submission.title == title:
             logger.info(f"Found hot submission by title: {submission.permalink}")
             return submission
             
+    # Search in rising posts
+    try:
+        for submission in subreddit_obj.rising(limit=20): # Check up to 20 rising posts
+            if submission.created_utc > search_time and submission.title == title:
+                logger.info(f"Found rising submission by title: {submission.permalink}")
+                return submission
+    except Exception as e:
+        logger.warning(f"Could not search rising posts: {e}")
+    
     logger.info(f"No recent submission found with title '{title}' in r/{subreddit_obj.display_name}")
     return None

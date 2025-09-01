@@ -70,6 +70,25 @@ def require_write_access(func: F) -> F:
     return cast(F, wrapper)
 
 
+def create_progress_reporter(ctx: Any) -> Callable[[Dict[str, Any]], None]:
+    """Create a standardized async-safe progress reporter."""
+    async def report_progress_async(data: Dict[str, Any]) -> None:
+        if hasattr(ctx, '__event_emitter__'):
+            await ctx.__event_emitter__({
+                "type": "status",
+                "data": {"description": data.get("message", "Unknown status"), "done": False}
+            })
+        elif hasattr(ctx, 'report_progress'):
+            ctx.report_progress(data)
+        else:
+            logger.info(f"Progress: {data}")
+
+    def report_progress(data: Dict[str, Any]) -> None:
+        asyncio.create_task(report_progress_async(data))
+
+    return report_progress
+
+
 mcp = FastMCP("Tiktok Reddit MCP")
 reddit_manager = RedditClientManager()
 
@@ -310,35 +329,65 @@ async def _post_downloaded_video_async(
             logger.warning(f"Could not determine file size for {video_path}: {e}")
             # We'll proceed anyway, as Reddit might give a more informative error
     
-    # Check if ctx has the report_progress attribute
-    if hasattr(ctx, 'report_progress'):
-        report_progress = ctx.report_progress
-    elif hasattr(ctx, '__event_emitter__'):
-        async def report_progress(data: Dict[str, Any]) -> None:
-            await ctx.__event_emitter__({
-                "type": "status",
-                "data": {"description": data.get("message", "Unknown status"), "done": False}
-            })
-    else:
-        logger.warning("ctx object does not have report_progress or __event_emitter__ attribute. Creating a dummy function.")
-        async def report_progress(data: Dict[str, Any]) -> None:
-            logger.info(f"Dummy report_progress called with: {data}")
-
+    # Create standardized progress reporter
+    report_progress = create_progress_reporter(ctx)
     await report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
+
+    # Transcode video to Reddit-safe format
+    transcoded_video_path = None
+    transcoding_info = None
+    try:
+        await report_progress({"status": "transcoding", "message": "Transcoding video to Reddit-safe format..."})
+        transcoding_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
+        transcoded_video_path = transcoding_result["transcoded_path"]
+        transcoding_info = transcoding_result
+        await report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
+        logger.info(f"Video transcoded to Reddit-safe format: {transcoded_video_path}")
+    except Exception as e:
+        logger.error(f"Error during video transcoding: {e}")
+        await report_progress({"status": "error", "message": f"Video transcoding failed: {e}"})
+        # If transcoding fails, we'll try to upload the original video
+        transcoded_video_path = video_path
+        await report_progress({"status": "warning", "message": "Using original video file for upload (transcoding failed)"})
+
+    # Validate thumbnail if provided
+    validated_thumbnail_path = None
+    if thumbnail_path and path.exists(thumbnail_path):
+        # Check if thumbnail has a valid extension
+        valid_extensions = {'.jpg', '.jpeg', '.png', '.webp'}
+        _, ext = path.splitext(thumbnail_path.lower())
+        if ext in valid_extensions:
+            validated_thumbnail_path = thumbnail_path
+        else:
+            logger.warning(f"Invalid thumbnail extension {ext}, skipping thumbnail")
+            await report_progress({"status": "warning", "message": f"Invalid thumbnail extension {ext}, skipping thumbnail"})
+    elif thumbnail_path:
+        logger.warning(f"Thumbnail file does not exist: {thumbnail_path}")
+        await report_progress({"status": "warning", "message": f"Thumbnail file does not exist: {thumbnail_path}"})
+
     try:
         post_info = await create_post(
             ctx=ctx,
             subreddit=subreddit,
             title=title,
-            video_path=video_path,
-            thumbnail_path=thumbnail_path if thumbnail_path and path.exists(thumbnail_path) else None,
+            video_path=transcoded_video_path,
+            thumbnail_path=validated_thumbnail_path,
             nsfw=nsfw,
             spoiler=spoiler,
             flair_id=flair_id,
             flair_text=flair_text,
         )
         await report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
-        result: Dict[str, Any] = { 'post': post_info, 'used_video_path': video_path }
+        result: Dict[str, Any] = {
+            'post': post_info,
+            'used_video_path': transcoded_video_path,
+            'original_video_path': video_path
+        }
+        
+        # Add transcoding info if available
+        if transcoding_info:
+            result['transcoding_info'] = transcoding_info
+            
         if comment:
             await report_progress({"status": "posting_video", "message": "Adding comment to post..."})
             post_id = post_info['metadata']['id']
@@ -354,12 +403,24 @@ async def _post_downloaded_video_async(
         # Attempt deletion after successful post/comment
         deleted = False
         try:
-            if path.exists(video_path):
+            # Delete original video file if it exists and is different from transcoded
+            if video_path and path.exists(video_path) and video_path != transcoded_video_path:
                 remove(video_path)
+                logger.info(f"Deleted original video file: {video_path}")
+                
+            # Delete transcoded video file if it exists
+            if transcoded_video_path and path.exists(transcoded_video_path):
+                remove(transcoded_video_path)
+                logger.info(f"Deleted transcoded video file: {transcoded_video_path}")
                 deleted = True
+                
+            # Delete thumbnail if it exists
             if thumbnail_path and path.exists(thumbnail_path):
-                try: remove(thumbnail_path)
-                except Exception: pass
+                try:
+                    remove(thumbnail_path)
+                    logger.info(f"Deleted thumbnail file: {thumbnail_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete thumbnail {thumbnail_path}: {e}")
         except Exception as e:
             logger.warning(f"Failed to delete video or thumbnail after posting: {e}")
             pass
@@ -368,6 +429,8 @@ async def _post_downloaded_video_async(
         return result
     except Exception as e:
         logger.error(f"Error in post_downloaded_video: {e}")
+        # Keep files for debugging if post fails
+        logger.info(f"Keeping video files for debugging: {video_path}, {transcoded_video_path}")
         raise
 
 

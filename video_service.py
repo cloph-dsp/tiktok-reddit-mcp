@@ -1,7 +1,10 @@
+
 import asyncio
 import logging
 import time
 import sys
+import subprocess
+import json
 from os import getenv, makedirs, path, remove
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
@@ -216,3 +219,185 @@ class VideoService:
         logger.info(f"Video available at: {video_path}")
         logger.info(f"Returning result: {result}")
         return result
+
+    async def transcode_to_reddit_safe(self, ctx: Any, video_path: str, output_folder: str = "transcoded") -> Dict[str, Any]:
+        """Transcode a video to Reddit-safe format (MP4, H.264, yuv420p, AAC, +faststart).
+
+        Args:
+            ctx: Context object for reporting progress.
+            video_path: Path to the input video file
+            output_folder: Destination folder for transcoded video
+
+        Returns:
+            Dict with transcoded_path, logs, and metadata
+        """
+        if not path.exists(video_path):
+            raise ValueError(f"Video file does not exist: {video_path}")
+
+        if not path.exists(output_folder):
+            makedirs(output_folder)
+
+        # Create async-safe progress reporter
+        async def report_progress_async(data: Dict[str, Any]) -> None:
+            if hasattr(ctx, '__event_emitter__'):
+                await ctx.__event_emitter__({
+                    "type": "status",
+                    "data": {"description": data.get("message", "Unknown status"), "done": False}
+                })
+            elif hasattr(ctx, 'report_progress'):
+                ctx.report_progress(data)
+            else:
+                logger.info(f"Progress: {data}")
+
+        def report_progress(data: Dict[str, Any]) -> None:
+            asyncio.create_task(report_progress_async(data))
+
+        # Get input video metadata using ffprobe
+        report_progress({"status": "transcoding", "message": "Analyzing input video..."})
+        input_info = {}
+        try:
+            ffprobe_cmd = [
+                "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", video_path
+            ]
+            ffprobe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=30)
+            if ffprobe_result.returncode != 0:
+                logger.warning(f"ffprobe failed: {ffprobe_result.stderr}")
+            else:
+                input_info = json.loads(ffprobe_result.stdout)
+                logger.info(f"Input video info: {input_info}")
+        except Exception as e:
+            logger.warning(f"Error getting video info (ffprobe not available?): {e}")
+            # Continue without metadata if ffprobe is not available
+
+        # Generate output filename
+        video_id = path.splitext(path.basename(video_path))[0]
+        output_filename = f"{video_id}_reddit_safe.mp4"
+        output_path = path.join(output_folder, output_filename)
+        
+        # Check if transcoded file already exists
+        if path.exists(output_path):
+            logger.info(f"Transcoded video already exists: {output_path}")
+            report_progress({"status": "transcoding", "message": f"Using existing transcoded video: {output_path}"})
+            
+            # Get metadata for existing file
+            output_info = {}
+            try:
+                ffprobe_cmd = [
+                    "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", output_path
+                ]
+                ffprobe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=30)
+                if ffprobe_result.returncode == 0:
+                    output_info = json.loads(ffprobe_result.stdout)
+                else:
+                    logger.warning(f"ffprobe failed for existing file: {ffprobe_result.stderr}")
+            except Exception as e:
+                logger.warning(f"Could not get metadata for existing transcoded file: {e}")
+                
+            return {
+                "transcoded_path": output_path,
+                "logs": "Using existing transcoded file",
+                "input_metadata": input_info,
+                "output_metadata": output_info
+            }
+
+        # Check if ffmpeg is available
+        ffmpeg_available = False
+        try:
+            result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
+            if result.returncode == 0:
+                ffmpeg_available = True
+        except Exception:
+            pass
+        
+        if not ffmpeg_available:
+            logger.warning("FFmpeg not available, returning original video path")
+            report_progress({"status": "transcoding", "message": "FFmpeg not available, using original video"})
+            return {
+                "transcoded_path": video_path,
+                "logs": "FFmpeg not available, using original video",
+                "input_metadata": input_info,
+                "output_metadata": input_info
+            }
+        
+        # Build ffmpeg command for transcoding
+        report_progress({"status": "transcoding", "message": "Transcoding video to Reddit-safe format..."})
+        logger.info(f"Transcoding {video_path} to {output_path}")
+        
+        # FFmpeg command to transcode to Reddit-safe format:
+        # - Video: H.264, yuv420p, even dimensions, CRF 23, veryfast preset, +faststart
+        # - Audio: AAC, 128k bitrate, 48000 Hz, stereo
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",  # Ensure even dimensions
+            "-crf", "23",
+            "-preset", "veryfast",
+            "-movflags", "+faststart",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "48000",
+            "-ac", "2",
+            "-max_muxing_queue_size", "1024",
+            output_path
+        ]
+        
+        logger.info(f"Running ffmpeg command: {' '.join(ffmpeg_cmd)}")
+        
+        try:
+            # Run ffmpeg and capture output
+            process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True
+            )
+            
+            # Collect output in real-time
+            logs = []
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    logs.append(output.strip())
+                    logger.debug(f"ffmpeg output: {output.strip()}")
+            
+            return_code = process.poll()
+            
+            if return_code != 0:
+                error_logs = "\n".join(logs)
+                logger.error(f"FFmpeg transcoding failed with code {return_code}: {error_logs}")
+                raise RuntimeError(f"FFmpeg transcoding failed: {error_logs}")
+            
+            success_logs = "\n".join(logs)
+            logger.info(f"FFmpeg transcoding completed successfully: {success_logs}")
+            report_progress({"status": "transcoding", "message": "Transcoding completed successfully"})
+            
+            # Get output video metadata
+            output_info = {}
+            try:
+                ffprobe_cmd = [
+                    "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", output_path
+                ]
+                ffprobe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=30)
+                if ffprobe_result.returncode == 0:
+                    output_info = json.loads(ffprobe_result.stdout)
+                else:
+                    logger.warning(f"ffprobe failed for transcoded file: {ffprobe_result.stderr}")
+            except Exception as e:
+                logger.warning(f"Could not get metadata for transcoded file: {e}")
+            
+            return {
+                "transcoded_path": output_path,
+                "logs": success_logs,
+                "input_metadata": input_info,
+                "output_metadata": output_info
+            }
+            
+        except subprocess.TimeoutExpired as e:
+            logger.error(f"FFmpeg transcoding timed out: {e}")
+            raise RuntimeError(f"FFmpeg transcoding timed out: {e}") from e
+        except Exception as e:
+            logger.error(f"Error during transcoding: {e}")
+            raise RuntimeError(f"Failed to transcode video: {e}") from e

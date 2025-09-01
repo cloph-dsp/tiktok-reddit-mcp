@@ -38,6 +38,96 @@ class RedditService:
             })
         else:
             logger.info(f"Progress: {data}")
+            
+    async def _poll_for_submission(
+        self,
+        ctx: Any,
+        subreddit_obj: praw.models.Subreddit,
+        title: str,
+        timeout_seconds: int = 180,
+        poll_interval: int = 5
+    ) -> Optional[praw.models.Submission]:
+        """Poll for a submission by title with timeout."""
+        logger.info(f"Polling for submission with title: {title}")
+        await self._report_progress(ctx, {"status": "polling", "message": f"Searching for post by title: {title}"})
+        
+        start_time = time.time()
+        attempt = 0
+        
+        while time.time() - start_time < timeout_seconds:
+            attempt += 1
+            logger.info(f"Polling attempt {attempt} for submission")
+            
+            # Try to find by title
+            submission = _find_submission_by_title(subreddit_obj, title)
+            if submission:
+                logger.info(f"Found submission by title: {submission.permalink}")
+                await self._report_progress(ctx, {"status": "polling", "message": f"Found post: {submission.permalink}"})
+                return submission
+                
+            # If not found, wait before next attempt
+            if time.time() - start_time < timeout_seconds:
+                logger.info(f"Submission not found, waiting {poll_interval} seconds before retry")
+                await self._report_progress(ctx, {"status": "polling", "message": f"Post not found yet, retrying in {poll_interval}s (attempt {attempt})"})
+                await asyncio.sleep(poll_interval)
+        
+        logger.warning(f"Timeout reached while polling for submission with title: {title}")
+        await self._report_progress(ctx, {"status": "polling", "message": f"Timeout searching for post by title after {timeout_seconds}s"})
+        return None
+        
+    async def _poll_for_media_readiness(
+        self,
+        ctx: Any,
+        submission: praw.models.Submission,
+        timeout_seconds: int = 120,
+        poll_interval: int = 3
+    ) -> bool:
+        """Poll for media readiness with timeout."""
+        logger.info(f"Polling for media readiness of submission: {submission.permalink}")
+        await self._report_progress(ctx, {"status": "media_processing", "message": f"Waiting for video to process: {submission.permalink}"})
+        
+        start_time = time.time()
+        attempt = 0
+        
+        while time.time() - start_time < timeout_seconds:
+            attempt += 1
+            logger.info(f"Media readiness check attempt {attempt}")
+            
+            try:
+                # Refresh the submission to get updated media info
+                submission.refresh()
+                
+                # Check if it's a video post and media is ready
+                if hasattr(submission, 'is_video') and submission.is_video:
+                    # Check for media or secure_media
+                    if (hasattr(submission, 'media') and submission.media) or \
+                       (hasattr(submission, 'secure_media') and submission.secure_media):
+                        logger.info(f"Media is ready for submission: {submission.permalink}")
+                        await self._report_progress(ctx, {"status": "media_ready", "message": f"Video processing complete: {submission.permalink}"})
+                        return True
+                        
+                # For v.redd.it links, check if they're working
+                if hasattr(submission, 'url') and 'v.redd.it' in submission.url:
+                    logger.info(f"Submission has v.redd.it URL, checking media: {submission.url}")
+                    # If we have a video URL, consider it ready
+                    if (hasattr(submission, 'media') and submission.media) or \
+                       (hasattr(submission, 'secure_media') and submission.secure_media):
+                        logger.info(f"Media is ready for v.redd.it submission: {submission.permalink}")
+                        await self._report_progress(ctx, {"status": "media_ready", "message": f"Video processing complete: {submission.permalink}"})
+                        return True
+                        
+            except Exception as e:
+                logger.warning(f"Error refreshing submission during media check: {e}")
+                
+            # If not ready, wait before next attempt
+            if time.time() - start_time < timeout_seconds:
+                logger.info(f"Media not ready, waiting {poll_interval} seconds before retry")
+                await self._report_progress(ctx, {"status": "media_processing", "message": f"Video still processing, retrying in {poll_interval}s (attempt {attempt})"})
+                await asyncio.sleep(poll_interval)
+        
+        logger.warning(f"Timeout reached while waiting for media readiness: {submission.permalink}")
+        await self._report_progress(ctx, {"status": "media_timeout", "message": f"Video processing timeout after {timeout_seconds}s: {submission.permalink}"})
+        return False
 
     async def create_post(
         self,
@@ -114,10 +204,14 @@ class RedditService:
                             await self._report_progress(ctx, {"status": "uploading", "message": f"Starting video upload (file size unknown): {log_error}"})
 
                     submission = None
-                    max_retries = 3
+                    max_retries = 4  # Increased retries
                     for attempt in range(1, max_retries + 1):
                         try:
                             logger.info(f"Attempt {attempt} to submit video.")
+                            
+                            # Default to without_websockets for better reliability
+                            use_websockets = False if attempt < max_retries else True  # Try websockets only on last attempt
+                            
                             submission = subreddit_obj.submit_video(
                                 title=title[:300],
                                 video_path=video_path,
@@ -127,93 +221,150 @@ class RedditService:
                                 send_replies=True,
                                 flair_id=flair_id,
                                 flair_text=flair_text,
-                                without_websockets=(attempt > 1),  # Use without_websockets on retry
+                                without_websockets=not use_websockets,  # Use without_websockets for reliability
                             )
                             logger.info("Video submission call completed.")
-                            break  # Success, exit retry loop
+                            
+                            # If we get here without exception, break out of retry loop
+                            break
                         except praw.exceptions.WebSocketException as ws_exc:
                             logger.warning(f"WebSocket error during video submission (attempt {attempt}): {ws_exc}")
                             if attempt < max_retries:
                                 logger.info("Retrying video submission...")
-                                time.sleep(2 ** attempt)  # Exponential backoff
+                                await asyncio.sleep(2 ** attempt)  # Exponential backoff
                             else:
                                 logger.error("Max retries reached for WebSocket error.")
                                 await self._report_progress(ctx, {"status": "error", "message": f"WebSocket error after {max_retries} attempts: {ws_exc}"})
-                                raise RuntimeError(
-                                    f"Failed to submit video due to WebSocket error after {max_retries} attempts: {ws_exc}. "
-                                    "This might indicate a temporary Reddit issue or a problem with the video file. "
-                                    "Your post may still have been created. Please check the subreddit manually."
-                                ) from ws_exc
+                                # Don't raise immediately, try to find the post
+                                submission = None
+                                break
                         except praw.exceptions.APIException as api_exc:
                             logger.error(f"Reddit API error during video submission (attempt {attempt}): {api_exc}", exc_info=True)
                             await self._report_progress(ctx, {"status": "error", "message": f"Reddit API error during video submission: {api_exc}"})
                             # Specific handling for common API errors
                             error_type = api_exc.error_type if hasattr(api_exc, 'error_type') else str(api_exc)
                             if "RATELIMIT" in error_type:
-                                raise RuntimeError(
-                                    f"Rate limit exceeded: {api_exc}. Please wait before trying again."
+                                raise RedditPostError(
+                                    f"Rate limit exceeded: {api_exc}. Please wait before trying again.",
+                                    details={
+                                        "error_type": "RATELIMIT",
+                                        "attempt": attempt,
+                                        "max_retries": max_retries
+                                    }
                                 ) from api_exc
                             elif "VIDEO_TOO_LONG" in error_type:
-                                raise RuntimeError(
-                                    f"Video is too long: {api_exc}. Please check the video length."
+                                raise RedditPostError(
+                                    f"Video is too long: {api_exc}. Please check the video length.",
+                                    details={
+                                        "error_type": "VIDEO_TOO_LONG",
+                                        "attempt": attempt,
+                                        "max_retries": max_retries
+                                    }
                                 ) from api_exc
                             elif "VIDEO_TOO_LARGE" in error_type:
-                                raise RuntimeError(
-                                    f"Video is too large: {api_exc}. Please check the video size."
+                                raise RedditPostError(
+                                    f"Video is too large: {api_exc}. Please check the video size.",
+                                    details={
+                                        "error_type": "VIDEO_TOO_LARGE",
+                                        "attempt": attempt,
+                                        "max_retries": max_retries
+                                    }
                                 ) from api_exc
                             elif "INVALID_VIDEO_FORMAT" in error_type:
-                                raise RuntimeError(
-                                    f"Invalid video format: {api_exc}. Please check the video format."
+                                raise RedditPostError(
+                                    f"Invalid video format: {api_exc}. Please check the video format.",
+                                    details={
+                                        "error_type": "INVALID_VIDEO_FORMAT",
+                                        "attempt": attempt,
+                                        "max_retries": max_retries
+                                    }
                                 ) from api_exc
                             else:
-                                raise RuntimeError(
-                                    f"Failed to submit video due to Reddit API error: {api_exc}. "
-                                    "This might indicate issues with video format, size, or subreddit settings."
-                                ) from api_exc
+                                if attempt < max_retries:
+                                    logger.info("Retrying video submission after API error...")
+                                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                                else:
+                                    raise RedditPostError(
+                                        f"Failed to submit video due to Reddit API error: {api_exc}. "
+                                        "This might indicate issues with video format, size, or subreddit settings.",
+                                        details={
+                                            "error_type": error_type,
+                                            "attempt": attempt,
+                                            "max_retries": max_retries,
+                                            "error_message": str(api_exc)
+                                        }
+                                    ) from api_exc
                         except requests.exceptions.RequestException as req_exc:
                             logger.error(f"Network error during video submission (attempt {attempt}): {req_exc}", exc_info=True)
                             await self._report_progress(ctx, {"status": "error", "message": f"Network error during video submission: {req_exc}"})
                             if attempt < max_retries:
                                 logger.info("Retrying video submission after network error...")
-                                time.sleep(2 ** attempt)  # Exponential backoff
+                                await asyncio.sleep(2 ** attempt)  # Exponential backoff
                             else:
-                                raise RuntimeError(
+                                raise RedditPostError(
                                     f"Failed to submit video due to network error after {max_retries} attempts: {req_exc}. "
-                                    "Please check your internet connection or try again later."
+                                    "Please check your internet connection or try again later.",
+                                    details={
+                                        "error_type": "NETWORK_ERROR",
+                                        "attempt": attempt,
+                                        "max_retries": max_retries,
+                                        "error_message": str(req_exc)
+                                    }
                                 ) from req_exc
                         except Exception as e:
                             logger.error(f"An unexpected error occurred during video submission (attempt {attempt}): {e}", exc_info=True)
                             await self._report_progress(ctx, {"status": "error", "message": f"Unexpected error during video submission: {e}"})
                             if attempt < max_retries:
                                 logger.info("Retrying video submission after unexpected error...")
-                                time.sleep(2 ** attempt)  # Exponential backoff
+                                await asyncio.sleep(2 ** attempt)  # Exponential backoff
                             else:
-                                raise RuntimeError(
+                                raise RedditPostError(
                                     f"An unexpected error occurred during video submission after {max_retries} attempts: {e}. "
-                                    "Please check the video file and try again."
+                                    "Please check the video file and try again.",
+                                    details={
+                                        "error_type": "UNEXPECTED_ERROR",
+                                        "attempt": attempt,
+                                        "max_retries": max_retries,
+                                        "error_message": str(e)
+                                    }
                                 ) from e
 
+                    # Handle case where submission is None or we had websocket errors
                     if submission is None:
                         logger.warning(
-                            "PRAW's submit_video returned None. Attempting to find the submission by title."
+                            "PRAW's submit_video returned None or failed. Attempting to find the submission by title."
                         )
+                        await self._report_progress(ctx, {"status": "polling", "message": "Video submitted, searching for post..."})
 
-                        # Attempt to find the submission by title
-                        submission = _find_submission_by_title(subreddit_obj, title[:300])
-
+                        # Poll for the submission by title
+                        submission = await self._poll_for_submission(ctx, subreddit_obj, title[:300])
+                        
                         if submission is None:
-                            # If still None, then the post truly failed or is not immediately retrievable
-
-                            raise RuntimeError(
-                                "Video submission might have succeeded, but PRAW could not retrieve "
-                                "the submission object, and it could not be found by title. "
-                                "Please check the subreddit manually."
+                            raise RedditPostError(
+                                "Video submission might have succeeded, but the post could not be found. "
+                                "Please check the subreddit manually.",
+                                details={
+                                    "error_type": "SUBMISSION_NOT_FOUND",
+                                    "title": title[:300],
+                                    "subreddit": clean_subreddit
+                                }
                             )
                         else:
-                            logger.info(f"Successfully retrieved submission by title: {submission.permalink}")
-                            await self._report_progress(ctx, {"status": "completed", "message": f"Successfully retrieved submission by title: {submission.permalink}"})
-                    else:
-                        await self._report_progress(ctx, {"status": "completed", "message": f"Video submitted successfully: {submission.permalink}"})
+                            logger.info(f"Successfully retrieved submission by polling: {submission.permalink}")
+                            await self._report_progress(ctx, {"status": "found", "message": f"Found post by polling: {submission.permalink}"})
+
+                    # Wait for media to be ready if this is a video post
+                    if submission and hasattr(submission, 'is_video') and submission.is_video:
+                        logger.info(f"Waiting for media readiness: {submission.permalink}")
+                        media_ready = await self._poll_for_media_readiness(ctx, submission)
+                        if not media_ready:
+                            logger.warning(f"Media not ready within timeout for: {submission.permalink}")
+                            await self._report_progress(ctx, {"status": "media_timeout", "message": f"Video still processing: {submission.permalink}"})
+                        else:
+                            logger.info(f"Media is ready: {submission.permalink}")
+                            await self._report_progress(ctx, {"status": "media_ready", "message": f"Video ready to view: {submission.permalink}"})
+                    
+                    await self._report_progress(ctx, {"status": "completed", "message": f"Video submitted successfully: {submission.permalink}"})
                 elif is_self:
 
                     submission = subreddit_obj.submit(
@@ -269,20 +420,42 @@ class RedditService:
                 # Check for specific error messages related to video uploads
                 error_message = str(post_error)
                 if "NO_VIDEOS" in error_message:
-                    raise ValueError(f"Failed to create post: This community does not allow videos. Original error: {error_message}") from post_error
+                    raise RedditPostError(
+                        f"Failed to create post: This community does not allow videos. Original error: {error_message}",
+                        details={
+                            "error_type": "NO_VIDEOS",
+                            "subreddit": clean_subreddit
+                        }
+                    ) from post_error
                 elif "Websocket error" in error_message or "MEDIA_UPLOAD_FAILED" in error_message:
-                    raise RuntimeError(
+                    raise RedditPostError(
                         f"Failed to create post: {error_message}. This often indicates an issue with the video file "
                         f"(e.g., corrupted, unsupported format, too large) or a temporary Reddit media server problem. "
                         f"Your post may still have been created and be awaiting moderation. Please check the video file "
-                        f"and try again if necessary."
+                        f"and try again if necessary.",
+                        details={
+                            "error_type": "MEDIA_UPLOAD_FAILED",
+                            "error_message": error_message
+                        }
                     ) from post_error
+                elif isinstance(post_error, RedditPostError):
+                    # Re-raise RedditPostError as is
+                    raise
                 else:
-                    raise RuntimeError(f"Failed to create post: {post_error}. Please check subreddit name, title, and content.") from post_error
+                    raise RedditPostError(
+                        f"Failed to create post: {post_error}. Please check subreddit name, title, and content.",
+                        details={
+                            "error_type": "GENERAL_POST_ERROR",
+                            "error_message": str(post_error)
+                        }
+                    ) from post_error
 
         except Exception as e:
             logger.error(f"An unexpected error occurred during post creation for r/{clean_subreddit}: {e}", exc_info=True) # Log full traceback
-            raise RedditPostError(f"An unexpected error occurred during post creation: {e}", original_exception=e) from e
+            if isinstance(e, RedditPostError):
+                raise
+            else:
+                raise RedditPostError(f"An unexpected error occurred during post creation: {e}", original_exception=e) from e
 
     async def reply_to_post(
         self, ctx: Any, post_id: str, content: str, subreddit: Optional[str] = None
