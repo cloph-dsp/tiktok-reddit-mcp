@@ -63,13 +63,14 @@ def require_write_access(func: F) -> F:
                 "Please provide valid REDDIT_USERNAME and REDDIT_PASSWORD environment variables."
             )
         logger.info(f"require_write_access: Calling {func.__name__} with args={args}, kwargs={kwargs}")
-        result = func(*args, **kwargs)
+        
+        # Call the function and handle both sync and async functions properly
+        if asyncio.iscoroutinefunction(func):
+            result = await func(*args, **kwargs)
+        else:
+            result = func(*args, **kwargs)
+            
         logger.info(f"require_write_access: {func.__name__} returned {result}")
-        # If result is a coroutine, await it; otherwise return it directly
-        if asyncio.iscoroutine(result):
-            logger.info(f"require_write_access: Awaiting coroutine {result}")
-            result = await result
-            logger.info(f"require_write_access: Awaited result is {result}")
         return result
 
     return cast(F, wrapper)
