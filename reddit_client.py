@@ -116,4 +116,15 @@ class RedditClientManager:
         if self._is_read_only:
             logger.error("Reddit client is in read-only mode")
             return False
-        return True
+
+        # Additional authentication check
+        try:
+            user = self._client.user.me()
+            if user is None:
+                logger.error("Reddit client user authentication failed - user.me() returned None")
+                return False
+            logger.info(f"Reddit client authenticated as: {user}")
+            return True
+        except Exception as e:
+            logger.error(f"Reddit client authentication check failed: {e}")
+            return False

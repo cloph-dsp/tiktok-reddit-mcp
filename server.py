@@ -79,36 +79,42 @@ def require_write_access(func: F) -> F:
 def create_progress_reporter(ctx: Any) -> Callable[[Dict[str, Any]], None]:
     """Create a standardized async-safe progress reporter."""
     async def report_progress_async(data: Dict[str, Any]) -> None:
-        if hasattr(ctx, '__event_emitter__'):
-            await ctx.__event_emitter__({
-                "type": "status",
-                "data": {"description": data.get("message", "Unknown status"), "done": False}
-            })
-        elif hasattr(ctx, 'report_progress'):
-            ctx.report_progress(data)
-        else:
-            # Enhanced logging for better visibility
-            status = data.get("status", "unknown")
-            message = data.get("message", "Unknown status")
-            logger.info(f"🔄 PROGRESS [{status.upper()}]: {message}")
+        try:
+            if hasattr(ctx, '__event_emitter__'):
+                await ctx.__event_emitter__({
+                    "type": "status",
+                    "data": {"description": data.get("message", "Unknown status"), "done": False}
+                })
+            elif hasattr(ctx, 'report_progress'):
+                ctx.report_progress(data)
+            else:
+                # Enhanced logging for better visibility
+                status = data.get("status", "unknown")
+                message = data.get("message", "Unknown status")
+                logger.info(f"🔄 PROGRESS [{status.upper()}]: {message}")
 
-            # Log additional details for specific statuses
-            if status == "uploading":
-                if "percentage" in data:
-                    logger.info(f"📊 Upload Progress: {data['percentage']}")
-                if "downloaded_mb" in data and "total_mb" in data:
-                    logger.info(f"📦 Data: {data['downloaded_mb']}MB / {data['total_mb']}MB")
-                if "speed_kbps" in data:
-                    logger.info(f"⚡ Speed: {data['speed_kbps']} KB/s")
-            elif status == "transcoding":
-                logger.info("🎬 Processing video for Reddit compatibility...")
-            elif status == "posting_video":
-                logger.info("📤 Submitting to Reddit...")
-            elif status == "media_processing":
-                logger.info("⏳ Waiting for Reddit to process video...")
+                # Log additional details for specific statuses
+                if status == "uploading":
+                    if "percentage" in data:
+                        logger.info(f"📊 Upload Progress: {data['percentage']}")
+                    if "downloaded_mb" in data and "total_mb" in data:
+                        logger.info(f"📦 Data: {data['downloaded_mb']}MB / {data['total_mb']}MB")
+                    if "speed_kbps" in data:
+                        logger.info(f"⚡ Speed: {data['speed_kbps']} KB/s")
+                elif status == "transcoding":
+                    logger.info("🎬 Processing video for Reddit compatibility...")
+                elif status == "posting_video":
+                    logger.info("📤 Submitting to Reddit...")
+                elif status == "media_processing":
+                    logger.info("⏳ Waiting for Reddit to process video...")
+        except Exception as e:
+            logger.warning(f"Failed to report progress: {e}")
 
     def report_progress(data: Dict[str, Any]) -> None:
-        asyncio.create_task(report_progress_async(data))
+        # Create task and handle it properly
+        task = asyncio.create_task(report_progress_async(data))
+        # Don't wait for completion to avoid blocking, but log if it fails
+        task.add_done_callback(lambda t: logger.warning(f"Progress reporting task failed: {t.exception()}") if t.exception() else None)
 
     return report_progress
 
@@ -441,13 +447,13 @@ async def _post_downloaded_video_async_impl(
                 report_progress({"status": "transcoding", "message": "Using existing transcoded video"})
             else:
                 transcoding_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
-        if transcoding_result is None:
-            raise ValueError("Could not transcode video.")
-        transcoded_video_path = transcoding_result["transcoded_path"]
-        transcoding_info = transcoding_result
-        report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
-        logger.info(f"Video transcoding result: {transcoding_result}")
-        logger.info(f"Video transcoded to Reddit-safe format: {transcoded_video_path}")
+                if transcoding_result is None:
+                    raise ValueError("Could not transcode video.")
+                transcoded_video_path = transcoding_result["transcoded_path"]
+                transcoding_info = transcoding_result
+                report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
+                logger.info(f"Video transcoding result: {transcoding_result}")
+                logger.info(f"Video transcoded to Reddit-safe format: {transcoded_video_path}")
     except Exception as e:
         logger.error(f"Error during video transcoding: {e}")
         report_progress({"status": "error", "message": f"Video transcoding failed: {e}"})

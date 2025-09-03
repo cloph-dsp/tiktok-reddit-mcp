@@ -29,14 +29,18 @@ class RedditService:
 
     async def _report_progress(self, ctx: Any, data: Dict[str, Any]) -> None:
         """Report progress via ctx.report_progress if available."""
+        logger.info(f"Reporting progress: {data}")
         if hasattr(ctx, 'report_progress'):
+            logger.info("Using ctx.report_progress")
             ctx.report_progress(data)
         elif hasattr(ctx, '__event_emitter__'):
+            logger.info("Using ctx.__event_emitter__")
             await ctx.__event_emitter__({
                 "type": "status",
                 "data": {"description": data.get("message", "Unknown status"), "done": False}
             })
         else:
+            logger.info("Using fallback logging")
             logger.info(f"Progress: {data}")
             
     async def _poll_for_submission(
@@ -221,6 +225,14 @@ class RedditService:
                 "environment variables are correctly set for authenticated access."
             )
 
+        # Additional authentication check
+        if not self.manager.check_user_auth():
+            raise RuntimeError(
+                "Reddit client authentication failed. Video submission requires authenticated access. "
+                "Please check your REDDIT_USERNAME, REDDIT_PASSWORD, REDDIT_CLIENT_ID, and REDDIT_CLIENT_SECRET "
+                "environment variables."
+            )
+
         # Input validation
         if not subreddit or not isinstance(subreddit, str):
             raise ValueError("Subreddit name is required")
@@ -265,6 +277,12 @@ class RedditService:
                             logger.info(f"Using without_websockets: {not use_websockets}")
                             
                             logger.info("Calling subreddit_obj.submit_video...")
+                            logger.info(f"Video submission parameters: title='{title[:300]}', video_path='{video_path}', thumbnail_path='{thumbnail_path}', without_websockets={not use_websockets}")
+
+                            # Log PRAW client state
+                            logger.info(f"PRAW client read-only state: {self.manager.client.read_only}")
+                            logger.info(f"PRAW client authenticated: {self.manager.client.user is not None}")
+
                             submission = subreddit_obj.submit_video(
                                 title=title[:300],
                                 video_path=video_path,
@@ -277,6 +295,11 @@ class RedditService:
                                 without_websockets=not use_websockets,  # Use without_websockets for reliability
                             )
                             logger.info("Video submission call completed.")
+                            logger.info(f"Submission result: {submission}")
+                            if submission:
+                                logger.info(f"Submission ID: {submission.id}, Permalink: {submission.permalink}")
+                            else:
+                                logger.error("PRAW submit_video returned None!")
                             
                             # If we get here without exception, break out of retry loop
                             break
