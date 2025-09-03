@@ -43,7 +43,8 @@ class VideoService:
 
         # Test network connectivity before attempting download
         try:
-            await self._test_network_connectivity()
+            # Run network test in a separate thread to avoid event loop issues
+            await asyncio.get_event_loop().run_in_executor(None, self._test_network_connectivity_sync)
         except Exception as net_error:
             logger.warning(f"Network connectivity test failed: {net_error}")
             logger.warning("Continuing with download attempt despite network test failure...")
@@ -226,7 +227,8 @@ class VideoService:
                     logger.info(f"Download attempt {attempt}/{max_download_attempts} with format {format_option}")
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                        # Run yt-dlp in a separate thread to avoid event loop issues
+                        info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=True))
                         video_id = info.get('id')
                         video_path = ydl.prepare_filename(info)
 
@@ -350,7 +352,8 @@ class VideoService:
 
         # Final validation of downloaded video
         try:
-            await self._validate_downloaded_video(video_path, video_id)
+            # Run validation in a separate thread to avoid event loop issues
+            await asyncio.get_event_loop().run_in_executor(None, lambda: self._validate_downloaded_video_sync(video_path, video_id))
             logger.info(f"Video validation passed: {video_path}")
         except Exception as validation_error:
             logger.error(f"Video validation failed: {validation_error}")
@@ -501,6 +504,82 @@ class VideoService:
                 "Please check your network settings and try again."
             ) from e
 
+        logger.info("✓ Network connectivity tests passed")
+
+    def _validate_downloaded_video_sync(self, video_path: str, video_id: str) -> None:
+        """Synchronous version of video validation to avoid event loop issues.
+        
+        Args:
+            video_path: Path to the downloaded video file
+            video_id: Video ID for logging purposes
+        """
+        # This is a wrapper that calls the async method in a synchronous context
+        # We need to create a new event loop for this
+        try:
+            # For now, we'll just do basic validation synchronously
+            logger.info(f"Validating downloaded video synchronously: {video_path}")
+            
+            # Check file exists
+            if not path.exists(video_path):
+                raise VideoDownloadError(f"Video file does not exist: {video_path}")
+            
+            # Check file size
+            try:
+                file_size = path.getsize(video_path)
+                logger.info(f"Video file size: {file_size} bytes ({file_size / (1024*1024):.2f} MB)")
+                
+                if file_size == 0:
+                    raise VideoDownloadError(f"Video file is empty: {video_path}")
+                
+                # Reddit limits: 15MB for free users, 1GB for premium
+                # Be conservative and check for reasonable minimum
+                if file_size < 1024:  # Less than 1KB
+                    raise VideoDownloadError(f"Video file suspiciously small: {file_size} bytes")
+                
+            except OSError as e:
+                raise VideoDownloadError(f"Cannot get file size: {e}") from e
+            
+            # Check file readability and basic format validation
+            try:
+                with open(video_path, 'rb') as f:
+                    # Read first 64KB for validation
+                    header_data = f.read(65536)
+                    if len(header_data) == 0:
+                        raise VideoDownloadError(f"Cannot read video file header: {video_path}")
+                    
+                    # Check for common video file signatures
+                    file_ext = path.splitext(video_path)[1].lower()
+                    
+                    if file_ext == '.mp4':
+                        # MP4 files should start with specific signatures
+                        if not (header_data.startswith(b'\x00\x00\x00') or
+                               header_data.startswith(b'\x66\x74\x79\x70') or
+                               header_data.startswith(b'moov') or
+                               header_data.startswith(b'mdat')):
+                            logger.warning(f"MP4 file doesn't have expected signature: {header_data[:4].hex()}")
+                    
+                    elif file_ext == '.mov':
+                        if not header_data.startswith(b'\x00\x00\x00'):
+                            logger.warning(f"MOV file doesn't have expected signature: {header_data[:4].hex()}")
+                    
+                    elif file_ext == '.avi':
+                        if not header_data.startswith(b'RIFF'):
+                            logger.warning(f"AVI file doesn't have expected signature: {header_data[:4].hex()}")
+                    
+                    # Try to read from different positions to ensure file is not truncated
+                    f.seek(max(0, file_size - 1024))  # Seek to near end
+                    end_data = f.read(1024)
+                    if len(end_data) == 0:
+                        raise VideoDownloadError(f"Video file appears truncated: {video_path}")
+                        
+            except Exception as e:
+                raise VideoDownloadError(f"Video file validation failed: {e}") from e
+            
+            logger.info(f"Video validation completed successfully: {video_path}")
+            
+        except Exception as e:
+            logger.error(f"Video validation failed: {e}")
+            raise
         logger.info("✓ Network connectivity tests passed")
 
     async def _test_network_connectivity(self) -> None:
