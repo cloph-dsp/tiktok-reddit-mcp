@@ -346,15 +346,18 @@ class VideoService:
         
         try:
             # Run ffmpeg and capture output
+            logger.info("Starting ffmpeg process...")
             process = subprocess.Popen(
                 ffmpeg_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True
             )
+            logger.info("ffmpeg process started.")
             
             # Collect output in real-time
             logs = []
+            logger.info("Starting to read ffmpeg output...")
             while True:
                 output = process.stdout.readline()
                 if output == '' and process.poll() is not None:
@@ -362,8 +365,10 @@ class VideoService:
                 if output:
                     logs.append(output.strip())
                     logger.debug(f"ffmpeg output: {output.strip()}")
+            logger.info("Finished reading ffmpeg output.")
             
             return_code = process.poll()
+            logger.info(f"ffmpeg process finished with return code: {return_code}")
             
             if return_code != 0:
                 error_logs = "\n".join(logs)

@@ -295,21 +295,11 @@ async def _post_downloaded_video_async(
 ) -> Dict[str, Any]:
     """Helper function to run the async part of post_downloaded_video."""
     logger.info(f"_post_downloaded_video_async called with video_path={video_path}, subreddit={subreddit}, title={title}")
-
-    # Global timeout to prevent indefinite hangs
-    try:
-        logger.info("Starting post_downloaded_video operation with extended timeout")
-        return await asyncio.wait_for(
-            _post_downloaded_video_async_impl(
-                ctx, video_path, subreddit, title, thumbnail_path, nsfw, spoiler,
-                flair_id, flair_text, comment, original_url, comment_language,
-                auto_comment, video_id, download_folder
-            ),
-            timeout=1800.0  # 30 minute global timeout
-        )
-    except asyncio.TimeoutError:
-        logger.error("Global timeout exceeded for post_downloaded_video operation after 30 minutes")
-        raise ValueError("Operation timed out after 30 minutes. The video posting process took too long and was cancelled.")
+    return await _post_downloaded_video_async_impl(
+        ctx, video_path, subreddit, title, thumbnail_path, nsfw, spoiler,
+        flair_id, flair_text, comment, original_url, comment_language,
+        auto_comment, video_id, download_folder
+    )
 
 async def _post_downloaded_video_async_impl(
     ctx: Any,
@@ -372,18 +362,12 @@ async def _post_downloaded_video_async_impl(
     if video_path:
         logger.info("Attempting to retrieve subreddit details...")
         try:
-            subreddit_details = await asyncio.wait_for(
-                reddit_service.get_subreddit_details(subreddit),
-                timeout=30.0  # 30 second timeout
-            )
+            subreddit_details = await reddit_service.get_subreddit_details(subreddit)
             if subreddit_details is None:
                 raise ValueError("Could not retrieve subreddit details.")
             logger.info(f"Subreddit details retrieved: {subreddit_details}")
             if not subreddit_details.get("video_post_allowed", False):
                 raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
-        except asyncio.TimeoutError:
-            logger.error("Timeout while retrieving subreddit details")
-            raise ValueError("Timeout retrieving subreddit details. Please try again.")
         except Exception as e:
             logger.error(f"Error retrieving subreddit details: {e}")
             raise
@@ -417,10 +401,7 @@ async def _post_downloaded_video_async_impl(
     try:
         report_progress({"status": "transcoding", "message": "Transcoding video to Reddit-safe format..."})
         logger.info("Starting video transcoding...")
-        transcoding_result = await asyncio.wait_for(
-            video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded"),
-            timeout=300.0  # 5 minute timeout for transcoding
-        )
+        transcoding_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
         if transcoding_result is None:
             raise ValueError("Could not transcode video.")
         transcoded_video_path = transcoding_result["transcoded_path"]
@@ -428,12 +409,6 @@ async def _post_downloaded_video_async_impl(
         report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
         logger.info(f"Video transcoding result: {transcoding_result}")
         logger.info(f"Video transcoded to Reddit-safe format: {transcoded_video_path}")
-    except asyncio.TimeoutError:
-        logger.error("Timeout during video transcoding")
-        report_progress({"status": "error", "message": "Video transcoding timed out"})
-        # If transcoding fails, we'll try to upload the original video
-        transcoded_video_path = video_path
-        report_progress({"status": "warning", "message": "Using original video file for upload (transcoding timed out)"})
     except Exception as e:
         logger.error(f"Error during video transcoding: {e}")
         report_progress({"status": "error", "message": f"Video transcoding failed: {e}"})
@@ -463,19 +438,16 @@ async def _post_downloaded_video_async_impl(
         if transcoded_video_path is None:
             raise ValueError("transcoded_video_path is None, cannot create post.")
         logger.info("Attempting to create Reddit post...")
-        post_info = await asyncio.wait_for(
-            create_post(
-                ctx=ctx,
-                subreddit=subreddit,
-                title=title,
-                video_path=transcoded_video_path,
-                thumbnail_path=validated_thumbnail_path,
-                nsfw=nsfw,
-                spoiler=spoiler,
-                flair_id=flair_id,
-                flair_text=flair_text,
-            ),
-            timeout=120.0  # 2 minute timeout for post creation
+        post_info = await create_post(
+            ctx=ctx,
+            subreddit=subreddit,
+            title=title,
+            video_path=transcoded_video_path,
+            thumbnail_path=validated_thumbnail_path,
+            nsfw=nsfw,
+            spoiler=spoiler,
+            flair_id=flair_id,
+            flair_text=flair_text,
         )
         report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
         logger.info(f"Post created successfully: {post_info['metadata']['permalink']}")
@@ -494,10 +466,7 @@ async def _post_downloaded_video_async_impl(
             report_progress({"status": "posting_video", "message": "Adding comment to post..."})
             post_id = post_info['metadata']['id']
             logger.info(f"Adding comment to post {post_id}...")
-            reply = await asyncio.wait_for(
-                reply_to_post(ctx=ctx, post_id=post_id, content=comment),
-                timeout=60.0  # 1 minute timeout for comment
-            )
+            reply = await reply_to_post(ctx=ctx, post_id=post_id, content=comment)
             report_progress({"status": "posting_video", "message": "Comment added."})
             result['comment'] = reply
             result['comment_language'] = comment_language

@@ -59,7 +59,9 @@ class RedditService:
             logger.info(f"Polling attempt {attempt} for submission")
             
             # Try to find by title
+            logger.info("Calling _find_submission_by_title...")
             submission = _find_submission_by_title(subreddit_obj, title)
+            logger.info("Finished calling _find_submission_by_title.")
             if submission:
                 logger.info(f"Found submission by title: {submission.permalink}")
                 await self._report_progress(ctx, {"status": "polling", "message": f"Found post: {submission.permalink}"})
@@ -69,7 +71,9 @@ class RedditService:
             if time.time() - start_time < timeout_seconds:
                 logger.info(f"Submission not found, waiting {poll_interval} seconds before retry")
                 await self._report_progress(ctx, {"status": "polling", "message": f"Post not found yet, retrying in {poll_interval}s (attempt {attempt})"})
+                logger.info(f"Sleeping for {poll_interval} seconds...")
                 await asyncio.sleep(poll_interval)
+                logger.info(f"Finished sleeping.")
         
         logger.warning(f"Timeout reached while polling for submission with title: {title}")
         await self._report_progress(ctx, {"status": "polling", "message": f"Timeout searching for post by title after {timeout_seconds}s"})
@@ -86,7 +90,9 @@ class RedditService:
 
         try:
             # Refresh the submission to get latest data
+            logger.info("Refreshing submission...")
             submission.refresh()
+            logger.info("Finished refreshing submission.")
 
             # Check if it's marked as a video post
             if not (hasattr(submission, 'is_video') and submission.is_video):
@@ -108,7 +114,9 @@ class RedditService:
                 # Try to access the video URL to verify it's working
                 try:
                     import requests
+                    logger.info(f"Accessing video URL: {submission.url}")
                     response = requests.head(submission.url, timeout=10, allow_redirects=True)
+                    logger.info(f"Video URL access returned status {response.status_code}: {submission.url}")
                     if response.status_code == 200:
                         logger.info(f"Video URL is accessible: {submission.url}")
                         return True
@@ -146,7 +154,10 @@ class RedditService:
 
             try:
                 # First validate the video submission
-                if await self._validate_video_submission(ctx, submission):
+                logger.info("Calling _validate_video_submission...")
+                validation_result = await self._validate_video_submission(ctx, submission)
+                logger.info(f"_validate_video_submission returned: {validation_result}")
+                if validation_result:
                     logger.info(f"Video submission validated successfully: {submission.permalink}")
                     await self._report_progress(ctx, {"status": "media_ready", "message": f"Video processing complete: {submission.permalink}"})
                     return True
@@ -158,7 +169,9 @@ class RedditService:
             if time.time() - start_time < timeout_seconds:
                 logger.info(f"Media not ready, waiting {poll_interval} seconds before retry")
                 await self._report_progress(ctx, {"status": "media_processing", "message": f"Video still processing, retrying in {poll_interval}s (attempt {attempt})"})
+                logger.info(f"Sleeping for {poll_interval} seconds...")
                 await asyncio.sleep(poll_interval)
+                logger.info(f"Finished sleeping.")
 
         logger.warning(f"Timeout reached while waiting for media readiness: {submission.permalink}")
         await self._report_progress(ctx, {"status": "media_timeout", "message": f"Video processing timeout after {timeout_seconds}s: {submission.permalink}"})
@@ -249,7 +262,9 @@ class RedditService:
                             
                             # Default to without_websockets for better reliability
                             use_websockets = False if attempt < max_retries else True  # Try websockets only on last attempt
+                            logger.info(f"Using without_websockets: {not use_websockets}")
                             
+                            logger.info("Calling subreddit_obj.submit_video...")
                             submission = subreddit_obj.submit_video(
                                 title=title[:300],
                                 video_path=video_path,
