@@ -41,6 +41,14 @@ class VideoService:
         url = urlunparse(parsed_url._replace(query=""))
         logger.info(f"Sanitized TikTok URL to: {url}")
 
+        # Test network connectivity before attempting download
+        try:
+            await self._test_network_connectivity()
+        except Exception as net_error:
+            logger.warning(f"Network connectivity test failed: {net_error}")
+            logger.warning("Continuing with download attempt despite network test failure...")
+            # Don't fail the entire operation due to network test issues
+
         # Check and update yt-dlp to latest version
         try:
             import subprocess
@@ -261,6 +269,32 @@ class VideoService:
 
                 except yt_dlp.utils.DownloadError as e:
                     last_error = e
+                    error_msg = str(e).lower()
+        
+                    # Check for network/DNS issues
+                    if ("name or service not known" in error_msg or
+                        "failed to resolve" in error_msg or
+                        "nodename nor servname provided" in error_msg or
+                        "name resolution failure" in error_msg):
+                        logger.error(f"DNS/Network error detected: {e}")
+                        logger.error("This indicates a network connectivity or DNS resolution issue.")
+                        logger.error("Please check:")
+                        logger.error("  1. Internet connection")
+                        logger.error("  2. DNS settings")
+                        logger.error("  3. Firewall/proxy settings")
+                        logger.error("  4. Whether TikTok is accessible in your region")
+        
+                        # For DNS issues, don't retry as it's likely a persistent network problem
+                        break
+        
+                    # Check for geo-blocking or access issues
+                    elif ("geo" in error_msg or "region" in error_msg or
+                          "not available" in error_msg or "blocked" in error_msg):
+                        logger.error(f"Geo-blocking or access issue detected: {e}")
+                        logger.error("The video may not be available in your region or requires authentication.")
+                        break
+        
+                    # For other errors, retry
                     logger.warning(f"Download attempt {attempt} failed: {e}")
                     if attempt < max_download_attempts:
                         logger.info(f"Retrying download in 5 seconds...")
@@ -423,6 +457,56 @@ class VideoService:
             # Continue without ffprobe validation
 
         logger.info(f"Video validation completed successfully: {video_path}")
+
+    def _test_network_connectivity_sync(self) -> None:
+        """Test basic network connectivity and DNS resolution (synchronous version).
+
+        Raises:
+            VideoDownloadError: If network connectivity issues are detected
+        """
+        logger.info("Testing network connectivity...")
+
+        try:
+            # Test basic internet connectivity
+            logger.info("Testing basic internet connectivity...")
+            test_response = requests.get("https://www.google.com", timeout=10)
+            test_response.raise_for_status()
+            logger.info("✓ Basic internet connectivity confirmed")
+
+        except requests.RequestException as e:
+            logger.error(f"✗ Basic internet connectivity test failed: {e}")
+            logger.error("Please check your internet connection and try again.")
+            raise VideoDownloadError(
+                f"Network connectivity test failed: {e}. "
+                "Please check your internet connection and try again."
+            ) from e
+
+        try:
+            # Test DNS resolution for TikTok
+            logger.info("Testing DNS resolution for TikTok...")
+            import socket
+            socket.gethostbyname("www.tiktok.com")
+            logger.info("✓ TikTok DNS resolution successful")
+
+        except socket.gaierror as e:
+            logger.error(f"✗ TikTok DNS resolution failed: {e}")
+            logger.error("This may indicate:")
+            logger.error("  - DNS server issues")
+            logger.error("  - TikTok being blocked in your region")
+            logger.error("  - Firewall/proxy blocking TikTok")
+            logger.error("  - Temporary network issues")
+            raise VideoDownloadError(
+                f"DNS resolution for TikTok failed: {e}. "
+                "This may indicate network issues or TikTok being blocked in your region. "
+                "Please check your network settings and try again."
+            ) from e
+
+        logger.info("✓ Network connectivity tests passed")
+
+    async def _test_network_connectivity(self) -> None:
+        """Test basic network connectivity and DNS resolution (async wrapper)."""
+        # Run the synchronous test in a thread to avoid event loop issues
+        await asyncio.to_thread(self._test_network_connectivity_sync)
 
     async def transcode_to_reddit_safe(self, ctx: Any, video_path: str, output_folder: str = "transcoded") -> Dict[str, Any]:
         """Transcode a video to Reddit-safe format (MP4, H.264, yuv420p, AAC, +faststart).
