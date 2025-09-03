@@ -361,21 +361,46 @@ async def _post_downloaded_video_async_impl(
         if not video_id:
             raise ValueError("Provide either video_path or video_id")
         # search for supported extensions
+        logger.info(f"Searching for video file with ID {video_id} in folder {download_folder}")
         for ext in ('.mp4', '.mov', '.mkv', '.webm'):
             candidate = path.join(download_folder, f"{video_id}{ext}")
+            logger.info(f"Checking candidate: {candidate}")
             if path.exists(candidate):
                 video_path = candidate
+                logger.info(f"Found video file: {candidate}")
                 break
         if not video_path or not path.exists(video_path):
+            # List all files in download folder for debugging
+            try:
+                files_in_folder = os.listdir(download_folder)
+                logger.info(f"Files in download folder {download_folder}: {files_in_folder}")
+            except Exception as e:
+                logger.warning(f"Could not list files in download folder: {e}")
             raise ValueError(f"Could not locate video for id {video_id} in '{download_folder}'")
     logger.info(f"Video path resolved to {video_path}")
     if not path.exists(video_path):
         raise ValueError("Video path does not exist")
     logger.info(f"Video exists at {video_path}")
 
+    # Additional video file validation
+    try:
+        file_size = os.path.getsize(video_path)
+        logger.info(f"Video file size: {file_size} bytes ({file_size / (1024*1024):.2f} MB)")
+        if file_size == 0:
+            raise ValueError(f"Video file is empty (0 bytes): {video_path}")
+        if file_size > 1024 * 1024 * 1024:  # 1GB
+            raise ValueError(f"Video file is too large ({file_size} bytes > 1GB): {video_path}")
+    except OSError as e:
+        logger.warning(f"Could not get file size for {video_path}: {e}")
+
     logger.info("Step 2: Processing comment language and auto-comment...")
     lang = comment_language.lower().strip()
-    if lang not in ("en", "pt", "both"):
+    # Handle common variations
+    if lang in ("english", "eng"):
+        lang = "en"
+    elif lang in ("portuguese", "portugues", "pt-br"):
+        lang = "pt"
+    elif lang not in ("en", "pt", "both"):
         lang = "both"
 
     auto_generated = False
@@ -416,7 +441,29 @@ async def _post_downloaded_video_async_impl(
             file_size = os.path.getsize(video_path)
             if file_size > max_size_bytes:
                 raise ValueError(f"Video file is too large ({file_size} bytes). Maximum allowed size is {max_size_bytes} bytes (1GB).")
-            logger.info(f"Video file size is valid: {file_size} bytes")
+            if file_size == 0:
+                raise ValueError(f"Video file is empty (0 bytes): {video_path}")
+            logger.info(f"Video file size is valid: {file_size} bytes ({file_size / (1024*1024):.2f} MB)")
+
+            # Test file readability
+            try:
+                with open(video_path, 'rb') as f:
+                    # Read first 1KB to ensure file is accessible
+                    test_data = f.read(1024)
+                    if len(test_data) == 0:
+                        raise ValueError(f"Video file appears to be empty or corrupted: {video_path}")
+                    # Check for common file signatures
+                    if test_data.startswith(b'\x00\x00\x00'):
+                        logger.info("Video file appears to be in MP4 format (good)")
+                    elif test_data.startswith(b'RIFF'):
+                        logger.warning("Video file appears to be in AVI format - may need transcoding")
+                    else:
+                        logger.info(f"Video file signature: {test_data[:4].hex()}")
+                logger.info("Video file is readable and appears valid")
+            except Exception as read_error:
+                logger.error(f"Video file read test failed: {read_error}")
+                raise ValueError(f"Video file cannot be read properly: {read_error}")
+
         except OSError as e:
             logger.warning(f"Could not determine file size for {video_path}: {e}")
             # We'll proceed anyway, as Reddit might give a more informative error

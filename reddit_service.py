@@ -312,6 +312,25 @@ class RedditService:
 
                             # Attempt video submission with improved error handling
                             try:
+                                logger.info(f"About to call PRAW submit_video with:")
+                                logger.info(f"  Title: {title[:300]}")
+                                logger.info(f"  Video path: {video_path}")
+                                logger.info(f"  Thumbnail path: {thumbnail_path}")
+                                logger.info(f"  Without websockets: {not use_websockets}")
+
+                                # Check if video file is readable
+                                try:
+                                    with open(video_path, 'rb') as f:
+                                        # Try to read first few bytes to ensure file is accessible
+                                        f.read(1024)
+                                    logger.info("Video file is readable")
+                                except Exception as file_error:
+                                    logger.error(f"Video file is not readable: {file_error}")
+                                    raise RedditPostError(
+                                        f"Video file cannot be read: {file_error}",
+                                        details={"error_type": "FILE_NOT_READABLE", "video_path": video_path}
+                                    )
+
                                 submission = subreddit_obj.submit_video(
                                     title=title[:300],
                                     video_path=video_path,
@@ -335,6 +354,14 @@ class RedditService:
 
                                 logger.info(f"Submission ID: {submission.id}, Permalink: {submission.permalink}")
 
+                            except praw.exceptions.WebSocketException as ws_error:
+                                logger.error(f"WebSocket error during video submission: {ws_error}")
+                                raise RedditPostError(
+                                    f"Video upload failed due to WebSocket error: {ws_error}. "
+                                    "This usually indicates an issue with the video file format, corruption, or Reddit's media servers. "
+                                    "Try re-downloading the video or check if the video format is supported.",
+                                    details={"error_type": "WEBSOCKET_ERROR", "original_error": str(ws_error), "video_path": video_path}
+                                ) from ws_error
                             except Exception as submit_error:
                                 logger.error(f"Video submission failed with error: {submit_error}")
                                 # Re-raise with more context
