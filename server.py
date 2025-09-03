@@ -298,17 +298,18 @@ async def _post_downloaded_video_async(
 
     # Global timeout to prevent indefinite hangs
     try:
+        logger.info("Starting post_downloaded_video operation with extended timeout")
         return await asyncio.wait_for(
             _post_downloaded_video_async_impl(
                 ctx, video_path, subreddit, title, thumbnail_path, nsfw, spoiler,
                 flair_id, flair_text, comment, original_url, comment_language,
                 auto_comment, video_id, download_folder
             ),
-            timeout=600.0  # 10 minute global timeout
+            timeout=1800.0  # 30 minute global timeout
         )
     except asyncio.TimeoutError:
-        logger.error("Global timeout exceeded for post_downloaded_video operation")
-        raise ValueError("Operation timed out. The video posting process took too long and was cancelled.")
+        logger.error("Global timeout exceeded for post_downloaded_video operation after 30 minutes")
+        raise ValueError("Operation timed out after 30 minutes. The video posting process took too long and was cancelled.")
 
 async def _post_downloaded_video_async_impl(
     ctx: Any,
@@ -329,7 +330,11 @@ async def _post_downloaded_video_async_impl(
     download_folder: str
 ) -> Dict[str, Any]:
     """Implementation of the async part of post_downloaded_video with timeout protection."""
+    logger.info(f"_post_downloaded_video_async_impl started at {time.time()}")
+    start_time = time.time()
+
     # Resolve video path from id if needed
+    logger.info("Step 1: Resolving video path...")
     if not video_path:
         if not video_id:
             raise ValueError("Provide either video_path or video_id")
@@ -346,6 +351,7 @@ async def _post_downloaded_video_async_impl(
         raise ValueError("Video path does not exist")
     logger.info(f"Video exists at {video_path}")
 
+    logger.info("Step 2: Processing comment language and auto-comment...")
     lang = comment_language.lower().strip()
     if lang not in ("en", "pt", "both"):
         lang = "both"
@@ -359,8 +365,10 @@ async def _post_downloaded_video_async_impl(
         else:
             comment = f"Original link / link original: {original_url}"
         auto_generated = True
+    logger.info(f"Comment processing complete. Comment: {comment}")
 
     # Check subreddit video posting allowance before attempting to post
+    logger.info("Step 3: Checking subreddit details...")
     if video_path:
         logger.info("Attempting to retrieve subreddit details...")
         try:
@@ -381,10 +389,11 @@ async def _post_downloaded_video_async_impl(
             raise
     
     # Pre-submission video file validation
+    logger.info("Step 4: Validating video file...")
     if video_path:
         if not os.path.exists(video_path):
             raise ValueError(f"Video file does not exist: {video_path}")
-        
+
         # Check file size (Reddit has a 1GB limit for videos)
         max_size_bytes = 1 * 1024 * 1024 * 1024  # 1 GB
         try:
@@ -395,12 +404,14 @@ async def _post_downloaded_video_async_impl(
         except OSError as e:
             logger.warning(f"Could not determine file size for {video_path}: {e}")
             # We'll proceed anyway, as Reddit might give a more informative error
-    
+
     # Create standardized progress reporter
+    logger.info("Step 5: Setting up progress reporting...")
     report_progress = create_progress_reporter(ctx)
     report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
 
     # Transcode video to Reddit-safe format
+    logger.info("Step 6: Starting video transcoding...")
     transcoded_video_path = None
     transcoding_info = None
     try:
@@ -431,6 +442,7 @@ async def _post_downloaded_video_async_impl(
         report_progress({"status": "warning", "message": "Using original video file for upload (transcoding failed)"})
 
     # Validate thumbnail if provided
+    logger.info("Step 7: Validating thumbnail...")
     validated_thumbnail_path = None
     if thumbnail_path and path.exists(thumbnail_path):
         # Check if thumbnail has a valid extension
@@ -444,7 +456,9 @@ async def _post_downloaded_video_async_impl(
     elif thumbnail_path:
         logger.warning(f"Thumbnail file does not exist: {thumbnail_path}")
         report_progress({"status": "warning", "message": f"Thumbnail file does not exist: {thumbnail_path}"})
+    logger.info(f"Thumbnail validation complete. Validated path: {validated_thumbnail_path}")
 
+    logger.info("Step 8: Creating Reddit post...")
     try:
         if transcoded_video_path is None:
             raise ValueError("transcoded_video_path is None, cannot create post.")
@@ -476,6 +490,7 @@ async def _post_downloaded_video_async_impl(
             result['transcoding_info'] = transcoding_info
             
         if comment:
+            logger.info("Step 9: Adding comment to post...")
             report_progress({"status": "posting_video", "message": "Adding comment to post..."})
             post_id = post_info['metadata']['id']
             logger.info(f"Adding comment to post {post_id}...")
@@ -493,6 +508,7 @@ async def _post_downloaded_video_async_impl(
             result['auto_comment_generated'] = False
 
         # Attempt deletion after successful post/comment
+        logger.info("Step 10: Cleaning up files...")
         deleted = False
         try:
             # Delete original video file if it exists and is different from transcoded
@@ -518,6 +534,8 @@ async def _post_downloaded_video_async_impl(
             pass
         
         logger.info(f"Video posted successfully to Reddit. Permalink: {post_info['metadata']['permalink']}")
+        end_time = time.time()
+        logger.info(f"_post_downloaded_video_async_impl completed successfully in {end_time - start_time:.2f} seconds")
         return result
     except Exception as e:
         logger.error(f"Error in post_downloaded_video: {e}")
