@@ -283,23 +283,65 @@ class RedditService:
                             logger.info(f"PRAW client read-only state: {self.manager.client.read_only}")
                             logger.info(f"PRAW client authenticated: {self.manager.client.user is not None}")
 
-                            submission = subreddit_obj.submit_video(
-                                title=title[:300],
-                                video_path=video_path,
-                                thumbnail_path=thumbnail_path,
-                                nsfw=nsfw,
-                                spoiler=spoiler,
-                                send_replies=True,
-                                flair_id=flair_id,
-                                flair_text=flair_text,
-                                without_websockets=not use_websockets,  # Use without_websockets for reliability
-                            )
-                            logger.info("Video submission call completed.")
-                            logger.info(f"Submission result: {submission}")
-                            if submission:
+                            # Validate video file before submission
+                            if not path.exists(video_path):
+                                raise RedditPostError(
+                                    f"Video file does not exist: {video_path}",
+                                    details={"error_type": "FILE_NOT_FOUND", "video_path": video_path}
+                                )
+
+                            # Check video file size (Reddit limit is 1GB)
+                            file_size = path.getsize(video_path)
+                            max_size = 1024 * 1024 * 1024  # 1GB
+                            if file_size > max_size:
+                                raise RedditPostError(
+                                    f"Video file is too large: {file_size} bytes (max: {max_size} bytes)",
+                                    details={"error_type": "FILE_TOO_LARGE", "file_size": file_size, "max_size": max_size}
+                                )
+
+                            # Check video file extension
+                            valid_extensions = {'.mp4', '.mov', '.avi', '.wmv', '.flv', '.webm', '.m4v', '.3gp'}
+                            file_ext = path.splitext(video_path)[1].lower()
+                            if file_ext not in valid_extensions:
+                                raise RedditPostError(
+                                    f"Unsupported video format: {file_ext}. Supported formats: {', '.join(valid_extensions)}",
+                                    details={"error_type": "UNSUPPORTED_FORMAT", "file_extension": file_ext, "supported_formats": list(valid_extensions)}
+                                )
+
+                            logger.info(f"Video file validation passed: {video_path} ({file_size} bytes, {file_ext})")
+
+                            # Attempt video submission with improved error handling
+                            try:
+                                submission = subreddit_obj.submit_video(
+                                    title=title[:300],
+                                    video_path=video_path,
+                                    thumbnail_path=thumbnail_path,
+                                    nsfw=nsfw,
+                                    spoiler=spoiler,
+                                    send_replies=True,
+                                    flair_id=flair_id,
+                                    flair_text=flair_text,
+                                    without_websockets=not use_websockets,
+                                )
+                                logger.info("Video submission call completed.")
+                                logger.info(f"Submission result: {submission}")
+
+                                if submission is None:
+                                    logger.error("PRAW submit_video returned None - this indicates a failure")
+                                    raise RedditPostError(
+                                        "Video submission failed: PRAW returned None. This usually indicates an issue with the video file or Reddit's servers.",
+                                        details={"error_type": "SUBMISSION_RETURNED_NONE", "video_path": video_path}
+                                    )
+
                                 logger.info(f"Submission ID: {submission.id}, Permalink: {submission.permalink}")
-                            else:
-                                logger.error("PRAW submit_video returned None!")
+
+                            except Exception as submit_error:
+                                logger.error(f"Video submission failed with error: {submit_error}")
+                                # Re-raise with more context
+                                raise RedditPostError(
+                                    f"Video submission failed: {submit_error}",
+                                    details={"error_type": "SUBMISSION_FAILED", "original_error": str(submit_error), "video_path": video_path}
+                                ) from submit_error
                             
                             # If we get here without exception, break out of retry loop
                             break
@@ -408,53 +450,29 @@ class RedditService:
                     # Handle case where submission is None or we had websocket errors
                     if submission is None:
                         logger.warning(
-                            "PRAW's submit_video returned None or failed. Attempting to find the submission by title."
+                            "PRAW's submit_video returned None or failed. This indicates the video upload did not complete successfully."
                         )
-                        await self._report_progress(ctx, {"status": "polling", "message": "Video submitted, searching for post..."})
+                        await self._report_progress(ctx, {"status": "error", "message": "Video upload failed - PRAW returned None"})
 
-                        # Poll for the submission by title
-                        submission = await self._poll_for_submission(ctx, subreddit_obj, title[:300])
-
-                        if submission is None:
-                            raise RedditPostError(
-                                "Video submission failed and post could not be found. "
-                                "The video upload likely failed. Please check the video file and try again.",
-                                details={
-                                    "error_type": "SUBMISSION_NOT_FOUND",
-                                    "title": title[:300],
-                                    "subreddit": clean_subreddit
-                                }
-                            )
-                        else:
-                            logger.info(f"Successfully retrieved submission by polling: {submission.permalink}")
-                            await self._report_progress(ctx, {"status": "found", "message": f"Found post by polling: {submission.permalink}"})
-
-                            # Validate the found submission
-                            if hasattr(submission, 'is_video') and submission.is_video:
-                                video_valid = await self._validate_video_submission(ctx, submission)
-                                if not video_valid:
-                                    logger.error(f"Found submission but video validation failed: {submission.permalink}")
-                                    await self._report_progress(ctx, {"status": "error", "message": f"Video upload failed - post found but video is not accessible: {submission.permalink}"})
-
-                                    # Delete the broken post
-                                    try:
-                                        submission.delete()
-                                        logger.info(f"Deleted broken video post: {submission.permalink}")
-                                        await self._report_progress(ctx, {"status": "error", "message": "Deleted broken post. Please check video file and try again."})
-                                    except Exception as delete_error:
-                                        logger.warning(f"Could not delete broken post: {delete_error}")
-
-                                    raise RedditPostError(
-                                        "Video upload failed. The post was found but the video is not accessible. "
-                                        "This usually indicates the video file is corrupted, too large, or in an unsupported format. "
-                                        "Please check the video file and try again.",
-                                        details={
-                                            "error_type": "VIDEO_UPLOAD_FAILED",
-                                            "permalink": submission.permalink,
-                                            "title": title[:300],
-                                            "subreddit": clean_subreddit
-                                        }
-                                    )
+                        # Don't attempt to poll for the submission since it was never created
+                        # Instead, provide clear error message about what went wrong
+                        raise RedditPostError(
+                            "Video submission failed: Reddit did not accept the video file. "
+                            "This could be due to:\n"
+                            "• Video file corruption\n"
+                            "• Unsupported video format\n"
+                            "• Video file too large (>1GB)\n"
+                            "• Reddit server issues\n"
+                            "• Invalid video content\n"
+                            "Please check the video file and try again.",
+                            details={
+                                "error_type": "VIDEO_UPLOAD_FAILED",
+                                "title": title[:300],
+                                "subreddit": clean_subreddit,
+                                "video_path": video_path,
+                                "file_size": path.getsize(video_path) if path.exists(video_path) else "unknown"
+                            }
+                        )
 
                     # Validate video submission immediately after creation
                     if submission and hasattr(submission, 'is_video') and submission.is_video:

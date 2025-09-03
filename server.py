@@ -1,3 +1,20 @@
+# Load environment variables from .env FIRST, before any other imports
+import os
+try:
+    from dotenv import load_dotenv  # type: ignore
+    # Load .env file with override=True to ensure variables are set
+    env_file = os.getenv("ENV_FILE", ".env")
+    result = load_dotenv(dotenv_path=env_file, override=True)
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Loaded .env file from {env_file}: {result}")
+    # Debug: log the environment variables
+    logger.info(f"REDDIT_CLIENT_ID loaded: {'***' if os.getenv('REDDIT_CLIENT_ID') else 'None'}")
+    logger.info(f"REDDIT_USERNAME loaded: {'***' if os.getenv('REDDIT_USERNAME') else 'None'}")
+except Exception as _e:  # pragma: no cover
+    import logging
+    logging.getLogger(__name__).warning(f"Could not load .env file: {_e}")
+
 import asyncio
 import functools
 import logging
@@ -11,7 +28,6 @@ import yt_dlp
 import yt_dlp.utils
 import requests
 import praw  # type: ignore
-import os
 from mcp.server.fastmcp import FastMCP
 
 # Import services
@@ -30,14 +46,6 @@ from whisper_config import USE_WHISPER, WhisperModel, _whisper_models
 
 # Import custom exceptions
 from exceptions import RedditPostError, VideoDownloadError, TranscriptionError
-
-# Load environment variables from .env if present
-try:
-    from dotenv import load_dotenv  # type: ignore
-    # Only load if variables not already in environment (override=False)
-    load_dotenv(dotenv_path=os.getenv("ENV_FILE", ".env"), override=False)
-except Exception as _e:  # pragma: no cover
-    logging.getLogger(__name__).warning(f"Could not load .env file: {_e}")
 
 F = TypeVar("F", bound=Callable[..., Any])
 if TYPE_CHECKING:

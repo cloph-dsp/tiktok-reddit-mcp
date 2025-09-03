@@ -4,6 +4,15 @@ from os import getenv
 from typing import Optional
 import praw  # type: ignore
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+    logger = logging.getLogger(__name__)
+    logger.info("Loaded .env file in reddit_client.py")
+except Exception as e:
+    logging.getLogger(__name__).warning(f"Could not load .env file in reddit_client.py: {e}")
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,14 +37,22 @@ class RedditClientManager:
         if current_time - self._last_init_time < self._init_cooldown:
             logger.info(f"Client initialization on cooldown. Waiting {self._init_cooldown} seconds between initializations.")
             return
-            
+
         self._last_init_time = current_time
-        
+
         client_id = getenv("REDDIT_CLIENT_ID")
         client_secret = getenv("REDDIT_CLIENT_SECRET")
         user_agent = getenv("REDDIT_USER_AGENT", "RedditMCPServer v1.0")
         username = getenv("REDDIT_USERNAME")
         password = getenv("REDDIT_PASSWORD")
+
+        # Debug logging
+        logger.info(f"Initializing Reddit client with credentials:")
+        logger.info(f"  REDDIT_CLIENT_ID: {'***' if client_id else 'None'}")
+        logger.info(f"  REDDIT_CLIENT_SECRET: {'***' if client_secret else 'None'}")
+        logger.info(f"  REDDIT_USERNAME: {'***' if username else 'None'}")
+        logger.info(f"  REDDIT_PASSWORD: {'***' if password else 'None'}")
+        logger.info(f"  REDDIT_USER_AGENT: {user_agent}")
 
         self._is_read_only = True
 
