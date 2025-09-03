@@ -580,7 +580,6 @@ class VideoService:
         except Exception as e:
             logger.error(f"Video validation failed: {e}")
             raise
-        logger.info("✓ Network connectivity tests passed")
 
     async def _test_network_connectivity(self) -> None:
         """Test basic network connectivity and DNS resolution (async wrapper)."""
