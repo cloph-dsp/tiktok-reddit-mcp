@@ -162,41 +162,141 @@ class VideoService:
         except Exception as e:
             logger.warning(f"Error during pre-download check: {e}")
 
+        # Enhanced yt-dlp options with retries and better error handling
         output_template = path.join(download_folder, '%(id)s.%(ext)s')
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': output_template,
-            'writethumbnail': True,
-            'progress_hooks': [progress_hook],  # Add progress hook
-        }
+
+        # Try different format options in order of preference
+        format_options = [
+            'best[ext=mp4]/best[height<=1080]',  # Prefer MP4, limit resolution
+            'best[ext=mp4]',                     # Fallback to any MP4
+            'best[height<=1080]/best',           # Limit resolution if no MP4
+            'best'                               # Last resort
+        ]
 
         video_path = None
         video_id = None
         thumbnail_deleted = False
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-                video_id = info.get('id')
-                video_path = ydl.prepare_filename(info)
-                base_filename, _ = path.splitext(video_path)
-                # Locate and immediately delete thumbnail (not retained)
-                for ext in ('.jpg', '.webp', '.png', '.image'):
-                    pth = base_filename + ext
-                    if path.exists(pth):
+        download_success = False
+        last_error = None
+
+        # Try different format options with retries
+        for format_option in format_options:
+            if download_success:
+                break
+
+            logger.info(f"Trying download with format: {format_option}")
+
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': False,  # Show warnings for debugging
+                'format': format_option,
+                'outtmpl': output_template,
+                'writethumbnail': True,
+                'progress_hooks': [progress_hook],
+                # Add retry and timeout options
+                'retries': 3,
+                'fragment_retries': 3,
+                'retry_sleep_functions': {
+                    'http': lambda n: min(2 ** n, 30),  # Exponential backoff, max 30s
+                    'fragment': lambda n: min(2 ** n, 10)  # Shorter for fragments
+                },
+                # Add timeout options
+                'socket_timeout': 30,
+                'extractor_retries': 3,
+                # Ensure we get MP4 when possible
+                'merge_output_format': 'mp4',
+                # Add headers to avoid blocking
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+            }
+
+            # Attempt download with retries
+            max_download_attempts = 3
+            for attempt in range(1, max_download_attempts + 1):
+                try:
+                    logger.info(f"Download attempt {attempt}/{max_download_attempts} with format {format_option}")
+
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                        video_id = info.get('id')
+                        video_path = ydl.prepare_filename(info)
+
+                        # Validate downloaded file
+                        if not path.exists(video_path):
+                            raise VideoDownloadError(f"Downloaded file not found: {video_path}")
+
+                        file_size = path.getsize(video_path)
+                        if file_size == 0:
+                            raise VideoDownloadError(f"Downloaded file is empty: {video_path}")
+
+                        # Check file size is reasonable (at least 100KB, max 500MB)
+                        min_size = 100 * 1024  # 100KB
+                        max_size = 500 * 1024 * 1024  # 500MB
+                        if file_size < min_size:
+                            raise VideoDownloadError(f"Downloaded file too small ({file_size} bytes < {min_size} bytes): {video_path}")
+                        if file_size > max_size:
+                            raise VideoDownloadError(f"Downloaded file too large ({file_size} bytes > {max_size} bytes): {video_path}")
+
+                        # Try to read file to ensure it's not corrupted
                         try:
-                            remove(pth)
-                            thumbnail_deleted = True
-                        except Exception:
-                            pass
+                            with open(video_path, 'rb') as f:
+                                # Read first 64KB to check file integrity
+                                test_data = f.read(65536)
+                                if len(test_data) == 0:
+                                    raise VideoDownloadError(f"Cannot read downloaded file: {video_path}")
+
+                                # Check for common video file signatures
+                                if not (test_data.startswith(b'\x00\x00\x00') or  # MP4
+                                       test_data.startswith(b'RIFF') or         # AVI
+                                       test_data.startswith(b'\x66\x74\x79\x70')):  # MP4 variant
+                                    logger.warning(f"Downloaded file may not be a valid video format. Signature: {test_data[:4].hex()}")
+
+                        except Exception as read_error:
+                            raise VideoDownloadError(f"Downloaded file is corrupted or unreadable: {read_error}") from read_error
+
+                        logger.info(f"Successfully downloaded and validated video: {video_path} ({file_size} bytes)")
+                        download_success = True
                         break
-        except yt_dlp.utils.DownloadError as e:
-            logger.error(f"yt-dlp download error: {e}")
-            raise RuntimeError(f"Failed to download TikTok video: {e}. This might be due to an invalid URL, geo-restrictions, or changes in TikTok's website. Please check the URL and try again.") from e
-        except Exception as e:
-            logger.error(f"An unexpected error occurred during download: {e}")
-            raise VideoDownloadError(f"An unexpected error occurred during TikTok video download: {e}", original_exception=e) from e
+
+                except yt_dlp.utils.DownloadError as e:
+                    last_error = e
+                    logger.warning(f"Download attempt {attempt} failed: {e}")
+                    if attempt < max_download_attempts:
+                        logger.info(f"Retrying download in 5 seconds...")
+                        await asyncio.sleep(5)
+                    else:
+                        logger.error(f"All download attempts failed for format {format_option}")
+                        break
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"Unexpected error in download attempt {attempt}: {e}")
+                    if attempt < max_download_attempts:
+                        logger.info(f"Retrying download in 5 seconds...")
+                        await asyncio.sleep(5)
+                    else:
+                        logger.error(f"All download attempts failed for format {format_option}")
+                        break
+
+        # If all format options failed, raise the last error
+        if not download_success:
+            error_msg = f"Failed to download video after trying all format options"
+            if last_error:
+                error_msg += f": {last_error}"
+            raise VideoDownloadError(error_msg, original_exception=last_error)
+
+        # Clean up thumbnail
+        base_filename, _ = path.splitext(video_path)
+        for ext in ('.jpg', '.webp', '.png', '.image'):
+            pth = base_filename + ext
+            if path.exists(pth):
+                try:
+                    remove(pth)
+                    thumbnail_deleted = True
+                    logger.info(f"Deleted thumbnail: {pth}")
+                except Exception as e:
+                    logger.warning(f"Could not delete thumbnail {pth}: {e}")
+                break
 
         result = {
             'original_url': original_url,
@@ -214,11 +314,115 @@ class VideoService:
             except Exception:
                 pass
 
+        # Final validation of downloaded video
+        try:
+            await self._validate_downloaded_video(video_path, video_id)
+            logger.info(f"Video validation passed: {video_path}")
+        except Exception as validation_error:
+            logger.error(f"Video validation failed: {validation_error}")
+            # Try to clean up the invalid file
+            try:
+                if path.exists(video_path):
+                    remove(video_path)
+                    logger.info(f"Cleaned up invalid video file: {video_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Could not clean up invalid file: {cleanup_error}")
+            raise VideoDownloadError(f"Downloaded video failed validation: {validation_error}") from validation_error
+
         # Log completion message for LLM to monitor
         logger.info(f"Download completed successfully. Video ID: {video_id}")
         logger.info(f"Video available at: {video_path}")
         logger.info(f"Returning result: {result}")
         return result
+
+    async def _validate_downloaded_video(self, video_path: str, video_id: str) -> None:
+        """Validate that a downloaded video is complete and valid for Reddit upload.
+
+        Args:
+            video_path: Path to the downloaded video file
+            video_id: Video ID for logging purposes
+
+        Raises:
+            VideoDownloadError: If validation fails
+        """
+        logger.info(f"Validating downloaded video: {video_path}")
+
+        # Check file exists
+        if not path.exists(video_path):
+            raise VideoDownloadError(f"Video file does not exist: {video_path}")
+
+        # Check file size
+        try:
+            file_size = path.getsize(video_path)
+            logger.info(f"Video file size: {file_size} bytes ({file_size / (1024*1024):.2f} MB)")
+
+            if file_size == 0:
+                raise VideoDownloadError(f"Video file is empty: {video_path}")
+
+            # Reddit limits: 15MB for free users, 1GB for premium
+            # Be conservative and check for reasonable minimum
+            if file_size < 1024:  # Less than 1KB
+                raise VideoDownloadError(f"Video file suspiciously small: {file_size} bytes")
+
+        except OSError as e:
+            raise VideoDownloadError(f"Cannot get file size: {e}") from e
+
+        # Check file readability and basic format validation
+        try:
+            with open(video_path, 'rb') as f:
+                # Read first 64KB for validation
+                header_data = f.read(65536)
+                if len(header_data) == 0:
+                    raise VideoDownloadError(f"Cannot read video file header: {video_path}")
+
+                # Check for common video file signatures
+                file_ext = path.splitext(video_path)[1].lower()
+
+                if file_ext == '.mp4':
+                    # MP4 files should start with specific signatures
+                    if not (header_data.startswith(b'\x00\x00\x00') or
+                           header_data.startswith(b'\x66\x74\x79\x70') or
+                           header_data.startswith(b'moov') or
+                           header_data.startswith(b'mdat')):
+                        logger.warning(f"MP4 file doesn't have expected signature: {header_data[:4].hex()}")
+
+                elif file_ext == '.mov':
+                    if not header_data.startswith(b'\x00\x00\x00'):
+                        logger.warning(f"MOV file doesn't have expected signature: {header_data[:4].hex()}")
+
+                elif file_ext == '.avi':
+                    if not header_data.startswith(b'RIFF'):
+                        logger.warning(f"AVI file doesn't have expected signature: {header_data[:4].hex()}")
+
+                # Try to read from different positions to ensure file is not truncated
+                f.seek(max(0, file_size - 1024))  # Seek to near end
+                end_data = f.read(1024)
+                if len(end_data) == 0:
+                    raise VideoDownloadError(f"Video file appears truncated: {video_path}")
+
+        except Exception as e:
+            raise VideoDownloadError(f"Video file validation failed: {e}") from e
+
+        # Optional: Try to get basic video info with ffprobe if available
+        try:
+            ffprobe_cmd = [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_format", "-show_streams", video_path
+            ]
+            result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=10)
+
+            if result.returncode == 0:
+                video_info = json.loads(result.stdout)
+                logger.info(f"Video validation successful - Duration: {video_info.get('format', {}).get('duration', 'unknown')}s")
+            else:
+                logger.warning(f"ffprobe validation failed: {result.stderr}")
+                # Don't fail the whole process if ffprobe isn't available or fails
+
+        except Exception as e:
+            logger.warning(f"Could not validate video with ffprobe: {e}")
+            # Continue without ffprobe validation
+
+        logger.info(f"Video validation completed successfully: {video_path}")
 
     async def transcode_to_reddit_safe(self, ctx: Any, video_path: str, output_folder: str = "transcoded") -> Dict[str, Any]:
         """Transcode a video to Reddit-safe format (MP4, H.264, yuv420p, AAC, +faststart).
