@@ -87,7 +87,25 @@ def create_progress_reporter(ctx: Any) -> Callable[[Dict[str, Any]], None]:
         elif hasattr(ctx, 'report_progress'):
             ctx.report_progress(data)
         else:
-            logger.info(f"Progress: {data}")
+            # Enhanced logging for better visibility
+            status = data.get("status", "unknown")
+            message = data.get("message", "Unknown status")
+            logger.info(f"🔄 PROGRESS [{status.upper()}]: {message}")
+
+            # Log additional details for specific statuses
+            if status == "uploading":
+                if "percentage" in data:
+                    logger.info(f"📊 Upload Progress: {data['percentage']}")
+                if "downloaded_mb" in data and "total_mb" in data:
+                    logger.info(f"📦 Data: {data['downloaded_mb']}MB / {data['total_mb']}MB")
+                if "speed_kbps" in data:
+                    logger.info(f"⚡ Speed: {data['speed_kbps']} KB/s")
+            elif status == "transcoding":
+                logger.info("🎬 Processing video for Reddit compatibility...")
+            elif status == "posting_video":
+                logger.info("📤 Submitting to Reddit...")
+            elif status == "media_processing":
+                logger.info("⏳ Waiting for Reddit to process video...")
 
     def report_progress(data: Dict[str, Any]) -> None:
         asyncio.create_task(report_progress_async(data))
@@ -401,7 +419,28 @@ async def _post_downloaded_video_async_impl(
     try:
         report_progress({"status": "transcoding", "message": "Transcoding video to Reddit-safe format..."})
         logger.info("Starting video transcoding...")
-        transcoding_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
+        # Check if video is already in a compatible format to skip transcoding
+        logger.info("Checking if transcoding is needed...")
+        video_ext = path.splitext(video_path)[1].lower()
+        compatible_formats = {'.mp4'}
+
+        if video_ext in compatible_formats:
+            logger.info(f"Video is already in compatible format ({video_ext}), skipping transcoding")
+            transcoded_video_path = video_path
+            transcoding_info = {"skipped": True, "reason": "Already in compatible format"}
+            report_progress({"status": "transcoding", "message": "Video format already compatible, skipping transcoding"})
+        else:
+            logger.info(f"Video needs transcoding from {video_ext} to MP4")
+            # Check if transcoded version already exists
+            base_name = path.splitext(path.basename(video_path))[0]
+            transcoded_path = path.join("transcoded", f"{base_name}_reddit_safe.mp4")
+            if path.exists(transcoded_path):
+                logger.info(f"Found existing transcoded video: {transcoded_path}")
+                transcoded_video_path = transcoded_path
+                transcoding_info = {"skipped": True, "reason": "Using existing transcoded file"}
+                report_progress({"status": "transcoding", "message": "Using existing transcoded video"})
+            else:
+                transcoding_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
         if transcoding_result is None:
             raise ValueError("Could not transcode video.")
         transcoded_video_path = transcoding_result["transcoded_path"]

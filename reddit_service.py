@@ -44,8 +44,8 @@ class RedditService:
         ctx: Any,
         subreddit_obj: praw.models.Subreddit,
         title: str,
-        timeout_seconds: int = 180,
-        poll_interval: int = 5
+        timeout_seconds: int = 60,  # Reduced from 180 to 60 seconds
+        poll_interval: int = 2      # Reduced from 5 to 2 seconds
     ) -> Optional[praw.models.Submission]:
         """Poll for a submission by title with timeout."""
         logger.info(f"Polling for submission with title: {title}")
@@ -138,8 +138,8 @@ class RedditService:
         self,
         ctx: Any,
         submission: praw.models.Submission,
-        timeout_seconds: int = 120,
-        poll_interval: int = 3
+        timeout_seconds: int = 45,  # Reduced from 120 to 45 seconds
+        poll_interval: int = 2      # Reduced from 3 to 2 seconds
     ) -> bool:
         """Poll for media readiness with timeout."""
         logger.info(f"Polling for media readiness of submission: {submission.permalink}")
