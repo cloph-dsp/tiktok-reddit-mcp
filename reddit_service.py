@@ -75,6 +75,57 @@ class RedditService:
         await self._report_progress(ctx, {"status": "polling", "message": f"Timeout searching for post by title after {timeout_seconds}s"})
         return None
         
+    async def _validate_video_submission(
+        self,
+        ctx: Any,
+        submission: praw.models.Submission,
+        timeout_seconds: int = 60
+    ) -> bool:
+        """Validate that a video submission has valid video content."""
+        logger.info(f"Validating video submission: {submission.permalink}")
+
+        try:
+            # Refresh the submission to get latest data
+            submission.refresh()
+
+            # Check if it's marked as a video post
+            if not (hasattr(submission, 'is_video') and submission.is_video):
+                logger.error(f"Submission is not marked as video: {submission.permalink}")
+                return False
+
+            # Check for media attributes
+            has_media = (hasattr(submission, 'media') and submission.media is not None)
+            has_secure_media = (hasattr(submission, 'secure_media') and submission.secure_media is not None)
+
+            if not (has_media or has_secure_media):
+                logger.error(f"Submission has no media attributes: {submission.permalink}")
+                return False
+
+            # Check for v.redd.it URL
+            if hasattr(submission, 'url') and 'v.redd.it' in submission.url:
+                logger.info(f"Submission has v.redd.it URL: {submission.url}")
+
+                # Try to access the video URL to verify it's working
+                try:
+                    import requests
+                    response = requests.head(submission.url, timeout=10, allow_redirects=True)
+                    if response.status_code == 200:
+                        logger.info(f"Video URL is accessible: {submission.url}")
+                        return True
+                    else:
+                        logger.error(f"Video URL returned status {response.status_code}: {submission.url}")
+                        return False
+                except requests.RequestException as e:
+                    logger.error(f"Could not access video URL {submission.url}: {e}")
+                    return False
+            else:
+                logger.warning(f"Submission does not have expected v.redd.it URL: {getattr(submission, 'url', 'No URL')}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error validating video submission: {e}")
+            return False
+
     async def _poll_for_media_readiness(
         self,
         ctx: Any,
@@ -85,46 +136,30 @@ class RedditService:
         """Poll for media readiness with timeout."""
         logger.info(f"Polling for media readiness of submission: {submission.permalink}")
         await self._report_progress(ctx, {"status": "media_processing", "message": f"Waiting for video to process: {submission.permalink}"})
-        
+
         start_time = time.time()
         attempt = 0
-        
+
         while time.time() - start_time < timeout_seconds:
             attempt += 1
             logger.info(f"Media readiness check attempt {attempt}")
-            
+
             try:
-                # Refresh the submission to get updated media info
-                submission.refresh()
-                
-                # Check if it's a video post and media is ready
-                if hasattr(submission, 'is_video') and submission.is_video:
-                    # Check for media or secure_media
-                    if (hasattr(submission, 'media') and submission.media) or \
-                       (hasattr(submission, 'secure_media') and submission.secure_media):
-                        logger.info(f"Media is ready for submission: {submission.permalink}")
-                        await self._report_progress(ctx, {"status": "media_ready", "message": f"Video processing complete: {submission.permalink}"})
-                        return True
-                        
-                # For v.redd.it links, check if they're working
-                if hasattr(submission, 'url') and 'v.redd.it' in submission.url:
-                    logger.info(f"Submission has v.redd.it URL, checking media: {submission.url}")
-                    # If we have a video URL, consider it ready
-                    if (hasattr(submission, 'media') and submission.media) or \
-                       (hasattr(submission, 'secure_media') and submission.secure_media):
-                        logger.info(f"Media is ready for v.redd.it submission: {submission.permalink}")
-                        await self._report_progress(ctx, {"status": "media_ready", "message": f"Video processing complete: {submission.permalink}"})
-                        return True
-                        
+                # First validate the video submission
+                if await self._validate_video_submission(ctx, submission):
+                    logger.info(f"Video submission validated successfully: {submission.permalink}")
+                    await self._report_progress(ctx, {"status": "media_ready", "message": f"Video processing complete: {submission.permalink}"})
+                    return True
+
             except Exception as e:
-                logger.warning(f"Error refreshing submission during media check: {e}")
-                
+                logger.warning(f"Error during media validation: {e}")
+
             # If not ready, wait before next attempt
             if time.time() - start_time < timeout_seconds:
                 logger.info(f"Media not ready, waiting {poll_interval} seconds before retry")
                 await self._report_progress(ctx, {"status": "media_processing", "message": f"Video still processing, retrying in {poll_interval}s (attempt {attempt})"})
                 await asyncio.sleep(poll_interval)
-        
+
         logger.warning(f"Timeout reached while waiting for media readiness: {submission.permalink}")
         await self._report_progress(ctx, {"status": "media_timeout", "message": f"Video processing timeout after {timeout_seconds}s: {submission.permalink}"})
         return False
@@ -341,11 +376,11 @@ class RedditService:
 
                         # Poll for the submission by title
                         submission = await self._poll_for_submission(ctx, subreddit_obj, title[:300])
-                        
+
                         if submission is None:
                             raise RedditPostError(
-                                "Video submission might have succeeded, but the post could not be found. "
-                                "Please check the subreddit manually.",
+                                "Video submission failed and post could not be found. "
+                                "The video upload likely failed. Please check the video file and try again.",
                                 details={
                                     "error_type": "SUBMISSION_NOT_FOUND",
                                     "title": title[:300],
@@ -356,9 +391,65 @@ class RedditService:
                             logger.info(f"Successfully retrieved submission by polling: {submission.permalink}")
                             await self._report_progress(ctx, {"status": "found", "message": f"Found post by polling: {submission.permalink}"})
 
-                    # Wait for media to be ready if this is a video post
+                            # Validate the found submission
+                            if hasattr(submission, 'is_video') and submission.is_video:
+                                video_valid = await self._validate_video_submission(ctx, submission)
+                                if not video_valid:
+                                    logger.error(f"Found submission but video validation failed: {submission.permalink}")
+                                    await self._report_progress(ctx, {"status": "error", "message": f"Video upload failed - post found but video is not accessible: {submission.permalink}"})
+
+                                    # Delete the broken post
+                                    try:
+                                        submission.delete()
+                                        logger.info(f"Deleted broken video post: {submission.permalink}")
+                                        await self._report_progress(ctx, {"status": "error", "message": "Deleted broken post. Please check video file and try again."})
+                                    except Exception as delete_error:
+                                        logger.warning(f"Could not delete broken post: {delete_error}")
+
+                                    raise RedditPostError(
+                                        "Video upload failed. The post was found but the video is not accessible. "
+                                        "This usually indicates the video file is corrupted, too large, or in an unsupported format. "
+                                        "Please check the video file and try again.",
+                                        details={
+                                            "error_type": "VIDEO_UPLOAD_FAILED",
+                                            "permalink": submission.permalink,
+                                            "title": title[:300],
+                                            "subreddit": clean_subreddit
+                                        }
+                                    )
+
+                    # Validate video submission immediately after creation
                     if submission and hasattr(submission, 'is_video') and submission.is_video:
-                        logger.info(f"Waiting for media readiness: {submission.permalink}")
+                        logger.info(f"Validating video submission: {submission.permalink}")
+
+                        # First immediate validation
+                        video_valid = await self._validate_video_submission(ctx, submission)
+                        if not video_valid:
+                            logger.error(f"Video submission validation failed immediately: {submission.permalink}")
+                            await self._report_progress(ctx, {"status": "error", "message": f"Video upload failed - post created but video is not accessible: {submission.permalink}"})
+
+                            # Delete the broken post
+                            try:
+                                submission.delete()
+                                logger.info(f"Deleted broken video post: {submission.permalink}")
+                                await self._report_progress(ctx, {"status": "error", "message": "Deleted broken post. Please check video file and try again."})
+                            except Exception as delete_error:
+                                logger.warning(f"Could not delete broken post: {delete_error}")
+
+                            raise RedditPostError(
+                                "Video upload failed. The post was created but the video is not accessible. "
+                                "This usually indicates the video file is corrupted, too large, or in an unsupported format. "
+                                "Please check the video file and try again.",
+                                details={
+                                    "error_type": "VIDEO_UPLOAD_FAILED",
+                                    "permalink": submission.permalink,
+                                    "title": title[:300],
+                                    "subreddit": clean_subreddit
+                                }
+                            )
+
+                        # Wait for media to be fully ready
+                        logger.info(f"Video validated, waiting for full media readiness: {submission.permalink}")
                         media_ready = await self._poll_for_media_readiness(ctx, submission)
                         if not media_ready:
                             logger.warning(f"Media not ready within timeout for: {submission.permalink}")
