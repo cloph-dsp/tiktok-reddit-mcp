@@ -207,7 +207,7 @@ class RedditService:
                         'https://oauth.reddit.com/api/media/asset.json',
                         headers=headers,
                         data={
-                            'filepath': os.path.basename(video_path),
+                            'filepath': path.basename(video_path),
                             'mimetype': 'video/mp4'
                         },
                         timeout=30
