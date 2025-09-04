@@ -18,6 +18,129 @@ from reddit_client import RedditClientManager
 # Import custom exceptions
 from exceptions import RedditPostError
 
+# Alternative Reddit API implementation
+class RedditAPIClient:
+    """Alternative Reddit API client using direct HTTP requests."""
+
+    def __init__(self, client_id: str, client_secret: str, username: str, password: str, user_agent: str = "RedditMCP/1.0"):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.username = username
+        self.password = password
+        self.user_agent = user_agent
+        self.access_token = None
+        self.token_expires = 0
+
+    def _get_access_token(self) -> str:
+        """Get OAuth2 access token."""
+        if self.access_token and time.time() < self.token_expires:
+            return self.access_token
+
+        auth = requests.auth.HTTPBasicAuth(self.client_id, self.client_secret)
+        data = {'grant_type': 'password', 'username': self.username, 'password': self.password}
+        headers = {'User-Agent': self.user_agent}
+
+        response = requests.post('https://www.reddit.com/api/v1/access_token',
+                               auth=auth, data=data, headers=headers)
+
+        if response.status_code == 200:
+            token_data = response.json()
+            self.access_token = token_data['access_token']
+            self.token_expires = time.time() + token_data['expires_in'] - 60  # 1 min buffer
+            return self.access_token
+        else:
+            raise Exception(f"Failed to get access token: {response.text}")
+
+    def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
+        """Make authenticated request to Reddit API."""
+        token = self._get_access_token()
+        headers = {
+            'Authorization': f'bearer {token}',
+            'User-Agent': self.user_agent
+        }
+
+        if 'headers' in kwargs:
+            kwargs['headers'].update(headers)
+        else:
+            kwargs['headers'] = headers
+
+        url = f'https://oauth.reddit.com{endpoint}'
+        response = requests.request(method, url, **kwargs)
+
+        if response.status_code == 401:  # Token expired
+            self.access_token = None
+            return self._make_request(method, endpoint, **kwargs)
+
+        response.raise_for_status()
+        return response.json()
+
+    def submit_video(self, subreddit: str, title: str, video_path: str, thumbnail_path: Optional[str] = None) -> Dict[str, Any]:
+        """Submit a video post using Reddit's API directly."""
+        logger.info(f"Submitting video via direct API: {video_path}")
+
+        # Step 1: Upload video to Reddit's media server
+        with open(video_path, 'rb') as f:
+            video_data = f.read()
+
+        # Get upload URL
+        upload_data = {
+            'filepath': path.basename(video_path),
+            'mimetype': 'video/mp4'
+        }
+
+        upload_response = self._make_request('POST', '/api/v1/upload/asset.json', json=upload_data)
+        upload_url = upload_response['args']['action']
+        upload_fields = upload_response['args']['fields']
+
+        # Upload video file
+        files = {'file': (path.basename(video_path), video_data, 'video/mp4')}
+        form_data = {field['name']: field['value'] for field in upload_fields}
+
+        upload_resp = requests.post(upload_url, data=form_data, files=files)
+        upload_resp.raise_for_status()
+
+        video_asset_id = upload_response['asset']['asset_id']
+        logger.info(f"Video uploaded successfully, asset ID: {video_asset_id}")
+
+        # Step 2: Upload thumbnail if provided
+        thumbnail_asset_id = None
+        if thumbnail_path and path.exists(thumbnail_path):
+            with open(thumbnail_path, 'rb') as f:
+                thumb_data = f.read()
+
+            thumb_upload_data = {
+                'filepath': path.basename(thumbnail_path),
+                'mimetype': 'image/jpeg'
+            }
+
+            thumb_upload_response = self._make_request('POST', '/api/v1/upload/asset.json', json=thumb_upload_data)
+            thumb_upload_url = thumb_upload_response['args']['action']
+            thumb_upload_fields = thumb_upload_response['args']['fields']
+
+            thumb_files = {'file': (path.basename(thumbnail_path), thumb_data, 'image/jpeg')}
+            thumb_form_data = {field['name']: field['value'] for field in thumb_upload_fields}
+
+            thumb_upload_resp = requests.post(thumb_upload_url, data=thumb_form_data, files=thumb_files)
+            thumb_upload_resp.raise_for_status()
+
+            thumbnail_asset_id = thumb_upload_response['asset']['asset_id']
+            logger.info(f"Thumbnail uploaded successfully, asset ID: {thumbnail_asset_id}")
+
+        # Step 3: Create the post
+        submit_data = {
+            'sr': subreddit,
+            'title': title,
+            'kind': 'video',
+            'video_poster_url': f'https://reddit-uploaded-media.s3-accelerate.amazonaws.com/{video_asset_id}/poster.jpg' if thumbnail_asset_id else None,
+            'url': f'https://reddit-uploaded-media.s3-accelerate.amazonaws.com/{video_asset_id}/video.mp4',
+            'sendreplies': True
+        }
+
+        result = self._make_request('POST', '/api/submit', data=submit_data)
+        logger.info(f"Post created successfully: {result}")
+
+        return result
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +149,61 @@ class RedditService:
 
     def __init__(self):
         self.manager = RedditClientManager()
+        self.api_client = None  # Alternative API client for fallback
+
+    def _get_api_client(self):
+        """Get or create alternative Reddit API client."""
+        if self.api_client is None:
+            # Get credentials from environment
+            client_id = getenv('REDDIT_CLIENT_ID')
+            client_secret = getenv('REDDIT_CLIENT_SECRET')
+            username = getenv('REDDIT_USERNAME')
+            password = getenv('REDDIT_PASSWORD')
+
+            if not all([client_id, client_secret, username, password]):
+                logger.warning("Reddit API credentials not available for alternative client")
+                return None
+
+            try:
+                self.api_client = RedditAPIClient(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    username=username,
+                    password=password
+                )
+                logger.info("Alternative Reddit API client initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize alternative Reddit API client: {e}")
+                return None
+
+        return self.api_client
+
+    def _convert_alt_result_to_submission(self, alt_result: Dict[str, Any], subreddit_obj) -> 'MockSubmission':
+        """Convert alternative API result to PRAW-like submission object."""
+        class MockSubmission:
+            def __init__(self, data: Dict[str, Any], subreddit):
+                self.id = data.get('id', '')
+                self.permalink = f"/r/{subreddit.display_name}/comments/{self.id}/"
+                self.url = data.get('url', '')
+                self.title = data.get('title', '')
+                self.is_video = True
+                self.media = {'reddit_video': {'fallback_url': self.url}}
+                self.secure_media = self.media
+                self.subreddit = subreddit
+                self.created_utc = time.time()
+
+            def delete(self):
+                # Mock delete - would need to implement actual delete via API
+                logger.info(f"Mock delete called for submission {self.id}")
+
+            @property
+            def mod(self):
+                class MockMod:
+                    def flair(self, **kwargs):
+                        logger.info(f"Mock flair called with: {kwargs}")
+                return MockMod()
+
+        return MockSubmission(alt_result, subreddit_obj)
 
     async def _report_progress(self, ctx: Any, data: Dict[str, Any]) -> None:
         """Report progress via ctx.report_progress if available."""
@@ -461,11 +639,39 @@ class RedditService:
                                         break  # Break out of retry loop with success
                                     else:
                                         logger.warning("Could not find post after WebSocket error")
+                                        logger.warning(f"PRAW WebSocket failed, trying alternative API client...")
+                                        await self._report_progress(ctx, {"status": "fallback", "message": "PRAW failed, trying alternative Reddit API..."})
+
+                                        # Try alternative API client
+                                        alt_client = self._get_api_client()
+                                        if alt_client:
+                                            try:
+                                                logger.info("Attempting video upload with alternative API client...")
+                                                alt_result = alt_client.submit_video(
+                                                    subreddit=clean_subreddit,
+                                                    title=title[:300],
+                                                    video_path=video_path,
+                                                    thumbnail_path=thumbnail_path
+                                                )
+
+                                                # Convert alternative API result to PRAW-like format
+                                                submission = self._convert_alt_result_to_submission(alt_result, subreddit_obj)
+                                                logger.info("Alternative API upload successful!")
+                                                await self._report_progress(ctx, {"status": "success", "message": "Video uploaded successfully using alternative API!"})
+                                                break  # Success!
+
+                                            except Exception as alt_error:
+                                                logger.error(f"Alternative API also failed: {alt_error}")
+                                                await self._report_progress(ctx, {"status": "error", "message": f"Both PRAW and alternative API failed: {alt_error}"})
+                                        else:
+                                            logger.warning("Alternative API client not available")
+
                                         raise RedditPostError(
                                             f"Video upload failed due to WebSocket error: {ws_error}. "
+                                            "Tried both PRAW and alternative API client. "
                                             "This usually indicates an issue with the video file format, corruption, or Reddit's media servers. "
                                             "Try re-downloading the video or check if the video format is supported.",
-                                            details={"error_type": "WEBSOCKET_ERROR", "original_error": str(ws_error), "video_path": video_path, "recoverable": is_recoverable}
+                                            details={"error_type": "WEBSOCKET_ERROR", "original_error": str(ws_error), "video_path": video_path, "recoverable": is_recoverable, "tried_alternative": True}
                                         ) from ws_error
                             except Exception as submit_error:
                                 logger.error(f"Video submission failed with error: {submit_error}")
@@ -508,6 +714,28 @@ class RedditService:
                                     break  # Success! Use the found submission
                                 else:
                                     logger.warning("Could not find post after WebSocket error")
+
+                                    # Try alternative API as last resort
+                                    logger.info("Trying alternative API client as last resort...")
+                                    alt_client = self._get_api_client()
+                                    if alt_client:
+                                        try:
+                                            logger.info("Attempting video upload with alternative API client...")
+                                            alt_result = alt_client.submit_video(
+                                                subreddit=clean_subreddit,
+                                                title=title[:300],
+                                                video_path=video_path,
+                                                thumbnail_path=thumbnail_path
+                                            )
+
+                                            submission = self._convert_alt_result_to_submission(alt_result, subreddit_obj)
+                                            logger.info("Alternative API upload successful!")
+                                            await self._report_progress(ctx, {"status": "success", "message": "Video uploaded successfully using alternative API!"})
+                                            break  # Success!
+
+                                        except Exception as alt_error:
+                                            logger.error(f"Alternative API also failed: {alt_error}")
+
                                     submission = None
                                     break
                         except praw.exceptions.APIException as api_exc:
@@ -665,24 +893,66 @@ class RedditService:
                             await asyncio.sleep(3)
                         else:
                             logger.warning("Could not find the post - it may not have been created or WebSocket error was fatal")
-                            await self._report_progress(ctx, {"status": "post_not_found", "message": "Could not locate the post after WebSocket error"})
-                            raise RedditPostError(
-                                "Video submission failed: WebSocket error occurred and post could not be located. "
-                                "This could be due to:\n"
-                                "• Video file corruption or unsupported format\n"
-                                "• Reddit server connectivity issues\n"
-                                "• Temporary WebSocket connection problems\n"
-                                "• Post may have been created but is awaiting moderation\n"
-                                "Please check the subreddit and try again if needed.",
-                                details={
-                                    "error_type": "WEBSOCKET_AND_POST_NOT_FOUND",
-                                    "title": title[:300],
-                                    "subreddit": clean_subreddit,
-                                    "video_path": video_path,
-                                    "file_size": path.getsize(video_path) if path.exists(video_path) else "unknown",
-                                    "search_strategies_attempted": ["title_poll", "truncated_title_poll", "user_posts_search"]
-                                }
-                            )
+
+                            # Try alternative API as final fallback
+                            logger.info("Trying alternative API client as final fallback...")
+                            alt_client = self._get_api_client()
+                            if alt_client:
+                                try:
+                                    logger.info("Attempting video upload with alternative API client...")
+                                    alt_result = alt_client.submit_video(
+                                        subreddit=clean_subreddit,
+                                        title=title[:300],
+                                        video_path=video_path,
+                                        thumbnail_path=thumbnail_path
+                                    )
+
+                                    submission = self._convert_alt_result_to_submission(alt_result, subreddit_obj)
+                                    logger.info("Alternative API upload successful!")
+                                    await self._report_progress(ctx, {"status": "success", "message": "Video uploaded successfully using alternative API!"})
+                                    # Don't raise error, we have success!
+
+                                except Exception as alt_error:
+                                    logger.error(f"Alternative API also failed: {alt_error}")
+                                    await self._report_progress(ctx, {"status": "error", "message": f"All upload methods failed: {alt_error}"})
+                                    raise RedditPostError(
+                                        "Video submission failed: All methods attempted (PRAW + Alternative API). "
+                                        "This could be due to:\n"
+                                        "• Video file corruption or unsupported format\n"
+                                        "• Reddit server connectivity issues\n"
+                                        "• Authentication problems\n"
+                                        "• Post may have been created but is awaiting moderation\n"
+                                        "Please check the subreddit and try again if needed.",
+                                        details={
+                                            "error_type": "ALL_METHODS_FAILED",
+                                            "title": title[:300],
+                                            "subreddit": clean_subreddit,
+                                            "video_path": video_path,
+                                            "file_size": path.getsize(video_path) if path.exists(video_path) else "unknown",
+                                            "methods_attempted": ["praw_websocket", "praw_search", "alternative_api"]
+                                        }
+                                    ) from alt_error
+                            else:
+                                await self._report_progress(ctx, {"status": "post_not_found", "message": "Could not locate the post after WebSocket error"})
+                                raise RedditPostError(
+                                    "Video submission failed: WebSocket error occurred and post could not be located. "
+                                    "Alternative API client not available. "
+                                    "This could be due to:\n"
+                                    "• Video file corruption or unsupported format\n"
+                                    "• Reddit server connectivity issues\n"
+                                    "• Temporary WebSocket connection problems\n"
+                                    "• Post may have been created but is awaiting moderation\n"
+                                    "Please check the subreddit and try again if needed.",
+                                    details={
+                                        "error_type": "WEBSOCKET_AND_POST_NOT_FOUND",
+                                        "title": title[:300],
+                                        "subreddit": clean_subreddit,
+                                        "video_path": video_path,
+                                        "file_size": path.getsize(video_path) if path.exists(video_path) else "unknown",
+                                        "search_strategies_attempted": ["title_poll", "truncated_title_poll", "user_posts_search"],
+                                        "alternative_api_available": False
+                                    }
+                                )
 
                     # Validate video submission immediately after creation
                     if submission and hasattr(submission, 'is_video') and submission.is_video:
