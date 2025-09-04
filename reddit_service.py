@@ -261,6 +261,11 @@ class RedditService:
         if not video_path and (not content or not isinstance(content, str)):
             raise ValueError("Post content/URL is required for non-video posts")
 
+        # CRITICAL: If video_path is provided, is_self should be False
+        if video_path and is_self:
+            logger.warning(f"Video path provided but is_self=True. Setting is_self=False for video post.")
+            is_self = False
+
         clean_subreddit = subreddit[2:] if subreddit.startswith("r/") else subreddit
         
         logger.info(f"create_post: subreddit={subreddit}, title={title}, video_path={video_path}, thumbnail_path={thumbnail_path}")
@@ -285,7 +290,7 @@ class RedditService:
                             await self._report_progress(ctx, {"status": "uploading", "message": f"Starting video upload (file size unknown): {log_error}"})
 
                     submission = None
-                    max_retries = 4  # Increased retries
+                    max_retries = 1  # Single attempt to avoid multiple posts
                     for attempt in range(1, max_retries + 1):
                         try:
                             logger.info(f"Attempt {attempt} to submit video.")
@@ -335,19 +340,63 @@ class RedditService:
                                 logger.info(f"  Video path: {video_path}")
                                 logger.info(f"  Thumbnail path: {thumbnail_path}")
                                 logger.info(f"  Without websockets: {not use_websockets}")
+                                logger.info(f"  PRAW version: {praw.__version__ if hasattr(praw, '__version__') else 'unknown'}")
+                                logger.info(f"  Client authenticated: {self.manager.client.user is not None}")
 
-                                # Check if video file is readable
+                                # Check if video file is readable and has valid content
                                 try:
                                     with open(video_path, 'rb') as f:
                                         # Try to read first few bytes to ensure file is accessible
-                                        f.read(1024)
-                                    logger.info("Video file is readable")
+                                        header = f.read(1024)
+                                        if len(header) < 100:
+                                            raise RedditPostError(
+                                                f"Video file is too small or empty: {len(header)} bytes",
+                                                details={"error_type": "FILE_TOO_SMALL", "video_path": video_path, "bytes_read": len(header)}
+                                            )
+   
+                                        # Check for basic video file signatures
+                                        if not (header.startswith(b'\x00\x00\x00') or  # MP4
+                                               header.startswith(b'RIFF') or         # AVI
+                                               header.startswith(b'\x66\x74\x79\x70') or  # MP4 variant
+                                               header.startswith(b'moov') or         # MOV
+                                               header.startswith(b'mdat')):          # MP4 data
+                                            logger.warning(f"Video file may not have valid signature: {header[:4].hex()}")
+   
+                                    logger.info("Video file is readable and has valid header")
                                 except Exception as file_error:
                                     logger.error(f"Video file is not readable: {file_error}")
                                     raise RedditPostError(
                                         f"Video file cannot be read: {file_error}",
                                         details={"error_type": "FILE_NOT_READABLE", "video_path": video_path}
                                     )
+
+                                # Log all parameters before submission
+                                logger.info("About to call PRAW submit_video with parameters:")
+                                logger.info(f"  subreddit: {clean_subreddit}")
+                                logger.info(f"  title: {title[:300]}")
+                                logger.info(f"  video_path: {video_path}")
+                                logger.info(f"  video_exists: {path.exists(video_path)}")
+                                logger.info(f"  video_size: {path.getsize(video_path) if path.exists(video_path) else 'N/A'}")
+                                logger.info(f"  thumbnail_path: {thumbnail_path}")
+                                logger.info(f"  without_websockets: {not use_websockets}")
+                                logger.info(f"  nsfw: {nsfw}")
+                                logger.info(f"  spoiler: {spoiler}")
+
+                                # Double-check video file before submission
+                                if not path.exists(video_path):
+                                    raise RedditPostError(
+                                        f"Video file disappeared before submission: {video_path}",
+                                        details={"error_type": "FILE_DISAPPEARED", "video_path": video_path}
+                                    )
+
+                                file_size = path.getsize(video_path)
+                                if file_size == 0:
+                                    raise RedditPostError(
+                                        f"Video file is empty before submission: {video_path}",
+                                        details={"error_type": "FILE_EMPTY", "video_path": video_path}
+                                    )
+
+                                logger.info(f"Final video file check passed: {file_size} bytes")
 
                                 submission = subreddit_obj.submit_video(
                                     title=title[:300],
@@ -361,7 +410,13 @@ class RedditService:
                                     without_websockets=not use_websockets,
                                 )
                                 logger.info("Video submission call completed.")
+                                logger.info(f"Submission result type: {type(submission)}")
                                 logger.info(f"Submission result: {submission}")
+
+                                if submission is not None:
+                                    logger.info(f"Submission ID: {getattr(submission, 'id', 'N/A')}")
+                                    logger.info(f"Submission permalink: {getattr(submission, 'permalink', 'N/A')}")
+                                    logger.info(f"Submission URL: {getattr(submission, 'url', 'N/A')}")
 
                                 if submission is None:
                                     logger.error("PRAW submit_video returned None - this indicates a failure")
@@ -671,15 +726,31 @@ class RedditService:
                     
                     await self._report_progress(ctx, {"status": "completed", "message": f"Video submitted successfully: {submission.permalink}"})
                 elif is_self:
-
-                    submission = subreddit_obj.submit(
-                        title=title[:300],
-                        selftext=content,
-                        nsfw=nsfw,
-                        spoiler=spoiler,
-                        send_replies=True,
-                    )
-                    await self._report_progress(ctx, {"status": "completed", "message": f"Text post created: {submission.permalink}"})
+                    # This should NEVER happen when video_path is provided
+                    if video_path:
+                        logger.error("CRITICAL ERROR: Attempting to create text post when video_path is provided!")
+                        logger.error(f"is_self: {is_self}, video_path: {video_path}")
+                        raise RedditPostError(
+                            "Logic error: Attempted to create text post when video_path was provided. "
+                            "This indicates a bug in the post creation logic.",
+                            details={
+                                "error_type": "LOGIC_ERROR_TEXT_POST_WITH_VIDEO",
+                                "is_self": is_self,
+                                "video_path": video_path,
+                                "content": content
+                            }
+                        )
+                    else:
+                        # Only create text post if no video_path is provided
+                        logger.info("Creating text post (no video provided)")
+                        submission = subreddit_obj.submit(
+                            title=title[:300],
+                            selftext=content,
+                            nsfw=nsfw,
+                            spoiler=spoiler,
+                            send_replies=True,
+                        )
+                        await self._report_progress(ctx, {"status": "completed", "message": f"Text post created: {submission.permalink}"})
                 else:
 
                     if content and not content.startswith(("http://", "https://")):

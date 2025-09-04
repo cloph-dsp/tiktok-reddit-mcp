@@ -566,11 +566,18 @@ async def _post_downloaded_video_async_impl(
     try:
         if transcoded_video_path is None:
             raise ValueError("transcoded_video_path is None, cannot create post.")
+
         logger.info("Attempting to create Reddit post...")
+        logger.info(f"Post type: VIDEO (video_path provided: {transcoded_video_path})")
+        logger.info(f"Video file exists: {path.exists(transcoded_video_path)}")
+        logger.info(f"Video file size: {path.getsize(transcoded_video_path) if path.exists(transcoded_video_path) else 'N/A'}")
+        # CRITICAL: When posting a video, is_self must be False
         post_info = await create_post(
             ctx=ctx,
             subreddit=subreddit,
             title=title,
+            content=None,  # No content for video posts
+            is_self=False,  # Explicitly set to False for video posts
             video_path=transcoded_video_path,
             thumbnail_path=validated_thumbnail_path,
             nsfw=nsfw,
