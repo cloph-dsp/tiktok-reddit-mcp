@@ -29,39 +29,92 @@ class VideoService:
             Tuple of (ffmpeg_path, ffprobe_path)
         """
         system = platform.system().lower()
+        logger.info(f"Detecting FFmpeg paths for system: {system}")
 
         if system == "windows":
             # Check common Windows FFmpeg locations
             possible_paths = [
+                # User's custom location (highest priority)
                 "E:\\ffmpeg\\bin\\ffmpeg.exe",
                 "E:\\ffmpeg\\bin\\ffprobe.exe",
+                # Standard installation locations
                 "C:\\ffmpeg\\bin\\ffmpeg.exe",
                 "C:\\ffmpeg\\bin\\ffprobe.exe",
-                "ffmpeg.exe",  # Fallback to PATH
-                "ffprobe.exe"  # Fallback to PATH
+                "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
+                "C:\\Program Files\\ffmpeg\\bin\\ffprobe.exe",
+                "C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe",
+                "C:\\Program Files (x86)\\ffmpeg\\bin\\ffprobe.exe",
+                # Chocolatey default location
+                "C:\\tools\\ffmpeg\\bin\\ffmpeg.exe",
+                "C:\\tools\\ffmpeg\\bin\\ffprobe.exe",
+                # Scoop default location
+                f"{path.expanduser('~')}\\scoop\\apps\\ffmpeg\\current\\bin\\ffmpeg.exe",
+                f"{path.expanduser('~')}\\scoop\\apps\\ffmpeg\\current\\bin\\ffprobe.exe",
+                # Fallback to PATH
+                "ffmpeg.exe",
+                "ffprobe.exe"
             ]
         else:
             # Linux/Unix systems
             possible_paths = [
+                # Standard system locations
                 "/usr/bin/ffmpeg",
                 "/usr/bin/ffprobe",
                 "/usr/local/bin/ffmpeg",
                 "/usr/local/bin/ffprobe",
-                "ffmpeg",  # Fallback to PATH
-                "ffprobe"  # Fallback to PATH
+                "/opt/ffmpeg/bin/ffmpeg",
+                "/opt/ffmpeg/bin/ffprobe",
+                # Snap package location
+                "/snap/ffmpeg/current/bin/ffmpeg",
+                "/snap/ffmpeg/current/bin/ffprobe",
+                # Flatpak location
+                "~/.local/share/flatpak/exports/bin/io.github.celluloid_video_player.Celluloid//ffmpeg",
+                "~/.local/share/flatpak/exports/bin/io.github.celluloid_video_player.Celluloid//ffprobe",
+                # Home directory installations
+                f"{path.expanduser('~')}/bin/ffmpeg",
+                f"{path.expanduser('~')}/bin/ffprobe",
+                f"{path.expanduser('~')}/ffmpeg/bin/ffmpeg",
+                f"{path.expanduser('~')}/ffmpeg/bin/ffprobe",
+                # Fallback to PATH
+                "ffmpeg",
+                "ffprobe"
             ]
 
         ffmpeg_path = None
         ffprobe_path = None
 
+        # Test each path
         for i in range(0, len(possible_paths), 2):
             ffmpeg_candidate = possible_paths[i]
             ffprobe_candidate = possible_paths[i + 1] if i + 1 < len(possible_paths) else possible_paths[i].replace('ffmpeg', 'ffprobe')
 
-            if path.exists(ffmpeg_candidate):
-                ffmpeg_path = ffmpeg_candidate
-            if path.exists(ffprobe_candidate):
-                ffprobe_path = ffprobe_candidate
+            # Expand user path for Linux
+            if system != "windows" and ffmpeg_candidate.startswith("~"):
+                ffmpeg_candidate = path.expanduser(ffmpeg_candidate)
+                ffprobe_candidate = path.expanduser(ffprobe_candidate)
+
+            # Check if executable exists and is actually executable
+            if path.exists(ffmpeg_candidate) and path.isfile(ffmpeg_candidate):
+                try:
+                    # Test if it's actually executable by running --help
+                    result = subprocess.run([ffmpeg_candidate, "--help"],
+                                          capture_output=True, timeout=5)
+                    if result.returncode == 0 or "ffmpeg version" in result.stderr.decode().lower():
+                        ffmpeg_path = ffmpeg_candidate
+                        logger.info(f"Found working FFmpeg: {ffmpeg_candidate}")
+                except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+                    logger.debug(f"FFmpeg candidate not executable: {ffmpeg_candidate}")
+
+            if path.exists(ffprobe_candidate) and path.isfile(ffprobe_candidate):
+                try:
+                    # Test if it's actually executable
+                    result = subprocess.run([ffprobe_candidate, "--help"],
+                                          capture_output=True, timeout=5)
+                    if result.returncode == 0 or "ffprobe version" in result.stderr.decode().lower():
+                        ffprobe_path = ffprobe_candidate
+                        logger.info(f"Found working FFprobe: {ffprobe_candidate}")
+                except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+                    logger.debug(f"FFprobe candidate not executable: {ffprobe_candidate}")
 
             if ffmpeg_path and ffprobe_path:
                 break
@@ -69,11 +122,12 @@ class VideoService:
         # Default fallbacks if not found
         if not ffmpeg_path:
             ffmpeg_path = "ffmpeg"
+            logger.warning("FFmpeg not found in standard locations, using PATH: ffmpeg")
         if not ffprobe_path:
             ffprobe_path = "ffprobe"
+            logger.warning("FFprobe not found in standard locations, using PATH: ffprobe")
 
-        logger.info(f"Using FFmpeg: {ffmpeg_path}")
-        logger.info(f"Using FFprobe: {ffprobe_path}")
+        logger.info(f"Final FFmpeg configuration - FFmpeg: {ffmpeg_path}, FFprobe: {ffprobe_path}")
 
         return ffmpeg_path, ffprobe_path
 

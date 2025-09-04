@@ -54,23 +54,41 @@ class RedditService:
         """Poll for a submission by title with timeout."""
         logger.info(f"Polling for submission with title: {title}")
         await self._report_progress(ctx, {"status": "polling", "message": f"Searching for post by title: {title}"})
-        
+
         start_time = time.time()
         attempt = 0
-        
+
+        # Clean the title for better matching (remove extra whitespace, normalize)
+        clean_title = title.strip()
+
         while time.time() - start_time < timeout_seconds:
             attempt += 1
             logger.info(f"Polling attempt {attempt} for submission")
-            
-            # Try to find by title
-            logger.info("Calling _find_submission_by_title...")
-            submission = _find_submission_by_title(subreddit_obj, title)
-            logger.info("Finished calling _find_submission_by_title.")
-            if submission:
-                logger.info(f"Found submission by title: {submission.permalink}")
-                await self._report_progress(ctx, {"status": "polling", "message": f"Found post: {submission.permalink}"})
-                return submission
-                
+
+            try:
+                # Try to find by title using our utility function
+                logger.info("Calling _find_submission_by_title...")
+                submission = _find_submission_by_title(subreddit_obj, clean_title)
+                logger.info("Finished calling _find_submission_by_title.")
+                if submission:
+                    logger.info(f"Found submission by title: {submission.permalink}")
+                    await self._report_progress(ctx, {"status": "polling", "message": f"Found post: {submission.permalink}"})
+                    return submission
+
+                # Also try searching the subreddit's new posts directly
+                logger.info("Also checking subreddit's new posts directly...")
+                try:
+                    for post in subreddit_obj.new(limit=10):  # Check last 10 posts
+                        if post.title.strip() == clean_title:
+                            logger.info(f"Found submission in new posts: {post.permalink}")
+                            await self._report_progress(ctx, {"status": "polling", "message": f"Found post in new posts: {post.permalink}"})
+                            return post
+                except Exception as search_error:
+                    logger.warning(f"Error searching new posts: {search_error}")
+
+            except Exception as poll_error:
+                logger.warning(f"Error during polling attempt {attempt}: {poll_error}")
+
             # If not found, wait before next attempt
             if time.time() - start_time < timeout_seconds:
                 logger.info(f"Submission not found, waiting {poll_interval} seconds before retry")
@@ -78,7 +96,7 @@ class RedditService:
                 logger.info(f"Sleeping for {poll_interval} seconds...")
                 await asyncio.sleep(poll_interval)
                 logger.info(f"Finished sleeping.")
-        
+
         logger.warning(f"Timeout reached while polling for submission with title: {title}")
         await self._report_progress(ctx, {"status": "polling", "message": f"Timeout searching for post by title after {timeout_seconds}s"})
         return None
@@ -375,12 +393,25 @@ class RedditService:
                                     continue  # Continue to next attempt
                                 else:
                                     # Non-recoverable or max retries reached
-                                    raise RedditPostError(
-                                        f"Video upload failed due to WebSocket error: {ws_error}. "
-                                        "This usually indicates an issue with the video file format, corruption, or Reddit's media servers. "
-                                        "Try re-downloading the video or check if the video format is supported.",
-                                        details={"error_type": "WEBSOCKET_ERROR", "original_error": str(ws_error), "video_path": video_path, "recoverable": is_recoverable}
-                                    ) from ws_error
+                                    logger.warning(f"Non-recoverable WebSocket error or max retries reached: {ws_error}")
+
+                                    # IMPORTANT: Even with WebSocket errors, the post might have been created!
+                                    # Try to find it before giving up
+                                    logger.info("WebSocket failed but post might have been created - searching...")
+                                    found_submission = await self._poll_for_submission(ctx, subreddit_obj, title, timeout_seconds=10)
+                                    if found_submission:
+                                        logger.info(f"Found post despite WebSocket error: {found_submission.permalink}")
+                                        # Don't raise error, return the found submission
+                                        submission = found_submission
+                                        break  # Break out of retry loop with success
+                                    else:
+                                        logger.warning("Could not find post after WebSocket error")
+                                        raise RedditPostError(
+                                            f"Video upload failed due to WebSocket error: {ws_error}. "
+                                            "This usually indicates an issue with the video file format, corruption, or Reddit's media servers. "
+                                            "Try re-downloading the video or check if the video format is supported.",
+                                            details={"error_type": "WEBSOCKET_ERROR", "original_error": str(ws_error), "video_path": video_path, "recoverable": is_recoverable}
+                                        ) from ws_error
                             except Exception as submit_error:
                                 logger.error(f"Video submission failed with error: {submit_error}")
                                 # Re-raise with more context
@@ -411,9 +442,19 @@ class RedditService:
                             else:
                                 logger.error("Max retries reached for WebSocket error or error is not recoverable.")
                                 await self._report_progress(ctx, {"status": "error", "message": f"WebSocket error after {max_retries} attempts: {ws_exc}"})
-                                # Don't raise immediately, try to find the post
-                                submission = None
-                                break
+
+                                # IMPORTANT: Even with WebSocket errors, the post might have been created!
+                                # Try to find it before giving up
+                                logger.info("WebSocket failed but post might have been created - searching...")
+                                found_submission = await self._poll_for_submission(ctx, subreddit_obj, title, timeout_seconds=15)
+                                if found_submission:
+                                    logger.info(f"Found post despite WebSocket error: {found_submission.permalink}")
+                                    submission = found_submission
+                                    break  # Success! Use the found submission
+                                else:
+                                    logger.warning("Could not find post after WebSocket error")
+                                    submission = None
+                                    break
                         except praw.exceptions.APIException as api_exc:
                             logger.error(f"Reddit API error during video submission (attempt {attempt}): {api_exc}", exc_info=True)
                             await self._report_progress(ctx, {"status": "error", "message": f"Reddit API error during video submission: {api_exc}"})
@@ -512,25 +553,81 @@ class RedditService:
                         )
                         await self._report_progress(ctx, {"status": "error", "message": "Video upload failed - PRAW returned None"})
 
-                        # Don't attempt to poll for the submission since it was never created
-                        # Instead, provide clear error message about what went wrong
-                        raise RedditPostError(
-                            "Video submission failed: Reddit did not accept the video file. "
-                            "This could be due to:\n"
-                            "• Video file corruption\n"
-                            "• Unsupported video format\n"
-                            "• Video file too large (>1GB)\n"
-                            "• Reddit server issues\n"
-                            "• Invalid video content\n"
-                            "Please check the video file and try again.",
-                            details={
-                                "error_type": "VIDEO_UPLOAD_FAILED",
-                                "title": title[:300],
-                                "subreddit": clean_subreddit,
-                                "video_path": video_path,
-                                "file_size": path.getsize(video_path) if path.exists(video_path) else "unknown"
-                            }
-                        )
+                        # IMPORTANT: Even when submission is None, the post might have been created!
+                        # Reddit sometimes creates the post but the WebSocket connection fails
+                        # Let's try to find the post by searching for it
+                        logger.info("Attempting to find post that might have been created despite WebSocket error...")
+                        await self._report_progress(ctx, {"status": "searching", "message": "Searching for post that may have been created despite WebSocket error..."})
+
+                        # Try multiple search strategies
+                        found_submission = None
+
+                        # Strategy 1: Poll for submission by title
+                        logger.info("Strategy 1: Polling for submission by title...")
+                        found_submission = await self._poll_for_submission(ctx, subreddit_obj, title, timeout_seconds=20)
+
+                        if not found_submission:
+                            # Strategy 2: Try with a slightly modified title (Reddit might have truncated it)
+                            logger.info("Strategy 2: Trying with truncated title...")
+                            truncated_title = title[:50] + "..." if len(title) > 50 else title
+                            found_submission = await self._poll_for_submission(ctx, subreddit_obj, truncated_title, timeout_seconds=10)
+
+                        if not found_submission:
+                            # Strategy 3: Check user's recent posts
+                            logger.info("Strategy 3: Checking user's recent posts...")
+                            try:
+                                user = self.manager.client.user.me()
+                                if user:
+                                    for post in user.submissions.new(limit=5):
+                                        if post.subreddit.display_name.lower() == clean_subreddit.lower():
+                                            # Check if the post was created recently (within last 5 minutes)
+                                            post_age = time.time() - post.created_utc
+                                            if post_age < 300:  # 5 minutes
+                                                logger.info(f"Found recent post in subreddit: {post.permalink}")
+                                                found_submission = post
+                                                break
+                            except Exception as user_search_error:
+                                logger.warning(f"Error searching user's posts: {user_search_error}")
+
+                        if found_submission:
+                            logger.info(f"Found the post despite WebSocket error: {found_submission.permalink}")
+                            await self._report_progress(ctx, {"status": "post_found", "message": f"Post found: {found_submission.permalink}"})
+
+                            # Log additional details about the found post
+                            logger.info(f"Found post details: ID={found_submission.id}, URL={found_submission.url}, is_video={getattr(found_submission, 'is_video', 'unknown')}")
+
+                            # Check if the post has a video URL
+                            if hasattr(found_submission, 'url') and found_submission.url:
+                                if 'v.redd.it' in found_submission.url:
+                                    logger.info(f"Post has v.redd.it URL: {found_submission.url}")
+                                else:
+                                    logger.warning(f"Post does not have expected v.redd.it URL: {found_submission.url}")
+
+                            submission = found_submission
+
+                            # Give Reddit a moment to fully process the post
+                            logger.info("Waiting a moment for Reddit to fully process the post...")
+                            await asyncio.sleep(3)
+                        else:
+                            logger.warning("Could not find the post - it may not have been created or WebSocket error was fatal")
+                            await self._report_progress(ctx, {"status": "post_not_found", "message": "Could not locate the post after WebSocket error"})
+                            raise RedditPostError(
+                                "Video submission failed: WebSocket error occurred and post could not be located. "
+                                "This could be due to:\n"
+                                "• Video file corruption or unsupported format\n"
+                                "• Reddit server connectivity issues\n"
+                                "• Temporary WebSocket connection problems\n"
+                                "• Post may have been created but is awaiting moderation\n"
+                                "Please check the subreddit and try again if needed.",
+                                details={
+                                    "error_type": "WEBSOCKET_AND_POST_NOT_FOUND",
+                                    "title": title[:300],
+                                    "subreddit": clean_subreddit,
+                                    "video_path": video_path,
+                                    "file_size": path.getsize(video_path) if path.exists(video_path) else "unknown",
+                                    "search_strategies_attempted": ["title_poll", "truncated_title_poll", "user_posts_search"]
+                                }
+                            )
 
                     # Validate video submission immediately after creation
                     if submission and hasattr(submission, 'is_video') and submission.is_video:
