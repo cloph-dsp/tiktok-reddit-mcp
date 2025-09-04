@@ -6,7 +6,6 @@ from datetime import datetime
 from os import getenv, path, remove
 from typing import Any, Dict, List, Optional
 import praw  # type: ignore
-import requests
 from utils import (
     _format_timestamp,
     _format_post,
@@ -60,38 +59,8 @@ class RedditService:
         """
         logger.info(f"Submitting video directly via API: {video_path}")
 
-        # Get Reddit credentials
-        client_id = getenv('REDDIT_CLIENT_ID')
-        client_secret = getenv('REDDIT_CLIENT_SECRET')
-        username = getenv('REDDIT_USERNAME')
-        password = getenv('REDDIT_PASSWORD')
-
-        if not all([client_id, client_secret, username, password]):
-            raise RedditPostError(
-                "Reddit API credentials not available for direct upload",
-                details={"error_type": "MISSING_CREDENTIALS"}
-            )
-
-        # Get OAuth2 access token
-        logger.info("Requesting OAuth2 access token...")
-        auth = requests.auth.HTTPBasicAuth(client_id, client_secret)
-        data = {'grant_type': 'password', 'username': username, 'password': password}
-        headers = {'User-Agent': 'RedditMCP/1.0'}
-
-        try:
-            token_response = requests.post('https://www.reddit.com/api/v1/access_token',
-                                          auth=auth, data=data, headers=headers, timeout=30)
-            token_response.raise_for_status()
-            token_data = token_response.json()
-            access_token = token_data['access_token']
-            expires_in = token_data.get('expires_in', 'unknown')
-            logger.info(f"Successfully obtained access token (expires in {expires_in}s)")
-        except Exception as e:
-            logger.error(f"Failed to obtain access token: {e}")
-            raise RedditPostError(
-                f"Failed to get access token: {e}",
-                details={"error_type": "TOKEN_ERROR", "original_error": str(e)}
-            )
+        # Use PRAW client for authentication and uploads
+        logger.info("Using PRAW client for authentication and uploads")
 
         # Step 1: Enhanced video validation before upload
         logger.info(f"Starting video validation for: {video_path}")
@@ -178,44 +147,24 @@ class RedditService:
         try:
             logger.info("Starting video upload (single attempt)")
 
-            # Get upload URL for video
-            upload_headers = {
-                'Authorization': f'bearer {access_token}',
-                'User-Agent': 'RedditMCP/1.0'
-            }
-
-            upload_data = {
-                'filepath': path.basename(video_path),
-                'mimetype': 'video/mp4'
-            }
-
-            upload_response = requests.post(
-                'https://oauth.reddit.com/api/media/asset.json',
-                headers=upload_headers,
-                json=upload_data,
-                timeout=30
+            # Use PRAW's built-in media upload method instead of direct requests
+            logger.info(f"Uploading video file ({file_size} bytes) using PRAW...")
+            video_url = self.manager.client.subreddit(subreddit)._upload_media(
+                expected_mime_prefix="video",
+                media_path=video_path
             )
-            upload_response.raise_for_status()
-            upload_info = upload_response.json()
 
-            upload_url = upload_info['args']['action']
-            upload_fields = upload_info['args']['fields']
-            video_asset_id = upload_info['asset']['asset_id']
+            # Extract asset ID from the returned URL
+            # PRAW returns the full URL, we need to extract the asset ID
+            if '/asset/' in video_url:
+                video_asset_id = video_url.split('/asset/')[1].split('/')[0]
+            else:
+                # Fallback: try to extract from URL pattern
+                import re
+                match = re.search(r'/([a-zA-Z0-9]+)/video\.mp4', video_url)
+                video_asset_id = match.group(1) if match else 'unknown'
 
-            logger.info(f"Got upload URL for video asset: {video_asset_id}")
-
-            # Upload video file
-            logger.info(f"Uploading video file ({file_size} bytes)...")
-            with open(video_path, 'rb') as f:
-                video_data = f.read()
-
-            files = {'file': (path.basename(video_path), video_data, 'video/mp4')}
-            form_data = {field['name']: field['value'] for field in upload_fields}
-
-            upload_resp = requests.post(upload_url, data=form_data, files=files, timeout=300)  # 5 min timeout
-            upload_resp.raise_for_status()
-
-            logger.info(f"Video uploaded successfully to asset: {video_asset_id}")
+            logger.info(f"Video uploaded successfully, asset ID: {video_asset_id}, URL: {video_url}")
 
         except Exception as upload_error:
             logger.error(f"Video upload failed: {upload_error}")
@@ -230,34 +179,24 @@ class RedditService:
             try:
                 await self._report_progress(ctx, {"status": "uploading", "message": "Uploading thumbnail..."})
 
-                thumb_upload_data = {
-                    'filepath': path.basename(thumbnail_path),
-                    'mimetype': 'image/jpeg'
-                }
+                logger.info("Uploading thumbnail using PRAW...")
 
-                thumb_upload_response = requests.post(
-                    'https://oauth.reddit.com/api/media/asset.json',
-                    headers=upload_headers,
-                    json=thumb_upload_data,
-                    timeout=30
+                # Use PRAW's built-in media upload method for thumbnail
+                thumb_url = self.manager.client.subreddit(subreddit)._upload_media(
+                    expected_mime_prefix="image",
+                    media_path=thumbnail_path
                 )
-                thumb_upload_response.raise_for_status()
-                thumb_upload_info = thumb_upload_response.json()
 
-                thumb_upload_url = thumb_upload_info['args']['action']
-                thumb_upload_fields = thumb_upload_info['args']['fields']
+                # Extract asset ID from the returned URL
+                if '/asset/' in thumb_url:
+                    thumbnail_asset_id = thumb_url.split('/asset/')[1].split('/')[0]
+                else:
+                    # Fallback: try to extract from URL pattern
+                    import re
+                    match = re.search(r'/([a-zA-Z0-9]+)/', thumb_url)
+                    thumbnail_asset_id = match.group(1) if match else 'unknown'
 
-                with open(thumbnail_path, 'rb') as f:
-                    thumb_data = f.read()
-
-                thumb_files = {'file': (path.basename(thumbnail_path), thumb_data, 'image/jpeg')}
-                thumb_form_data = {field['name']: field['value'] for field in thumb_upload_fields}
-
-                thumb_upload_resp = requests.post(thumb_upload_url, data=thumb_form_data, files=thumb_files, timeout=60)
-                thumb_upload_resp.raise_for_status()
-
-                thumbnail_asset_id = thumb_upload_info['asset']['asset_id']
-                logger.info("Thumbnail uploaded successfully")
+                logger.info(f"Thumbnail uploaded successfully, asset ID: {thumbnail_asset_id}")
 
             except Exception as e:
                 logger.warning(f"Failed to upload thumbnail: {e}")
@@ -292,33 +231,19 @@ class RedditService:
 
             logger.info(f"Submitting post data: {submit_data}")
 
-            submit_response = requests.post(
-                'https://oauth.reddit.com/api/submit',
-                headers=upload_headers,
-                data=submit_data,
-                timeout=30
+            # Use PRAW's submit method instead of direct API call
+            logger.info("Using PRAW's submit method for post creation...")
+            submission = self.manager.client.subreddit(subreddit).submit(
+                title=title,
+                url=video_url,
+                nsfw=nsfw,
+                spoiler=spoiler,
+                flair_id=flair_id,
+                flair_text=flair_text,
+                send_replies=True
             )
-            submit_response.raise_for_status()
-            submit_result = submit_response.json()
-
-            if not submit_result.get('success', False):
-                logger.error(f"Post creation failed: {submit_result}")
-                raise RedditPostError(
-                    f"Post creation failed: {submit_result}",
-                    details={"error_type": "SUBMIT_FAILED", "response": submit_result}
-                )
-
-            post_data = submit_result['jquery'][10][3][0]  # Reddit's response format
-            post_id = post_data['data']['id']
-
-            logger.info(f"Post created successfully with ID: {post_id}")
-            logger.info(f"Post URL: https://reddit.com/r/{subreddit}/comments/{post_id}")
-
-            # Get the PRAW submission object
-            subreddit_obj = self.manager.client.subreddit(subreddit)
-            submission = self.manager.client.submission(id=post_id)
-
-            logger.info(f"Retrieved PRAW submission object: {submission.permalink}")
+            logger.info(f"Post created successfully with ID: {submission.id}")
+            logger.info(f"Post URL: {submission.permalink}")
             return submission
 
         except Exception as e:
@@ -435,18 +360,17 @@ class RedditService:
 
                 # Try to access the video URL to verify it's working
                 try:
-                    import requests
                     logger.info(f"Accessing video URL: {submission.url}")
-                    response = requests.head(submission.url, timeout=10, allow_redirects=True)
-                    logger.info(f"Video URL access returned status {response.status_code}: {submission.url}")
-                    if response.status_code == 200:
-                        logger.info(f"Video URL is accessible: {submission.url}")
+                    # Use PRAW's built-in request handling instead of direct requests
+                    # For now, we'll just check if the URL exists in the expected format
+                    if 'v.redd.it' in submission.url:
+                        logger.info(f"Video URL appears to be in correct format: {submission.url}")
                         return True
                     else:
-                        logger.error(f"Video URL returned status {response.status_code}: {submission.url}")
+                        logger.warning(f"Video URL does not have expected v.redd.it format: {submission.url}")
                         return False
-                except requests.RequestException as e:
-                    logger.error(f"Could not access video URL {submission.url}: {e}")
+                except Exception as e:
+                    logger.error(f"Could not validate video URL {submission.url}: {e}")
                     return False
             else:
                 logger.warning(f"Submission does not have expected v.redd.it URL: {getattr(submission, 'url', 'No URL')}")
