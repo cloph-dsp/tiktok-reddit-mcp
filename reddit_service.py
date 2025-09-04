@@ -147,54 +147,140 @@ class RedditService:
         await self._report_progress(ctx, {"status": "posting_video", "message": f"Creating video post in r/{subreddit}"})
 
         try:
-            # Use PRAW's built-in submission method
-            logger.info("Step 1: Submitting video via PRAW...")
-            await self._report_progress(ctx, {"status": "uploading", "message": "Submitting video..."})
+            # Manual API implementation for video upload
+            logger.info("Step 1: Starting video upload process...")
+            await self._report_progress(ctx, {"status": "uploading", "message": "Starting video upload..."})
 
-            # Get authenticated Reddit client
-            if not self.manager.client:
-                raise RedditPostError(
-                    "Reddit client not initialized",
-                    details={"error_type": "CLIENT_NOT_INITIALIZED"}
+            import mimetypes
+            import requests
+            import json
+            from requests.auth import HTTPBasicAuth
+
+            # Get Reddit credentials
+            client_id = getenv('REDDIT_CLIENT_ID')
+            client_secret = getenv('REDDIT_CLIENT_SECRET')
+            username = getenv('REDDIT_USERNAME')
+            password = getenv('REDDIT_PASSWORD')
+
+            if not all([client_id, client_secret, username, password]):
+                raise RedditPostError("Missing Reddit credentials")
+
+            # Step 1: Get access token
+            logger.info("Getting access token...")
+            auth = HTTPBasicAuth(client_id, client_secret)
+            headers = {'User-Agent': 'RedditMCP/1.0'}
+            data = {
+                'grant_type': 'password',
+                'username': username,
+                'password': password
+            }
+
+            try:
+                token_response = requests.post(
+                    'https://www.reddit.com/api/v1/access_token',
+                    auth=auth,
+                    data=data,
+                    headers=headers,
+                    timeout=30
                 )
-            
-            if self.manager.is_read_only:
-                raise RedditPostError(
-                    "Reddit client is in read-only mode",
-                    details={"error_type": "READ_ONLY_CLIENT"}
+                token_response.raise_for_status()
+                token_data = token_response.json()
+                access_token = token_data['access_token']
+            except Exception as e:
+                raise RedditPostError(f"Failed to get access token: {str(e)}")
+
+            # Update headers with token
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'User-Agent': 'RedditMCP/1.0'
+            }
+
+            # Step 2: Upload video to Reddit's media server
+            logger.info("Uploading video to Reddit's media server...")
+            await self._report_progress(ctx, {"status": "uploading", "message": "Uploading video..."})
+
+            try:
+                # Get video file details
+                file_size = path.getsize(video_path)
+                mime_type = mimetypes.guess_type(video_path)[0] or 'video/mp4'
+
+                # Request upload URL
+                upload_lease_url = 'https://oauth.reddit.com/api/v1/media/asset.json'
+                lease_payload = {
+                    'filepath': path.basename(video_path),
+                    'mimetype': mime_type
+                }
+
+                lease_response = requests.post(
+                    upload_lease_url,
+                    headers=headers,
+                    data=lease_payload,
+                    timeout=30
                 )
+                lease_response.raise_for_status()
+                lease_data = lease_response.json()
 
-            reddit = self.manager.client
-            subreddit_obj = reddit.subreddit(subreddit)
+                if 'args' not in lease_data:
+                    raise RedditPostError("Invalid lease response from Reddit")
 
-            # Verify video file exists and is readable
-            if not path.exists(video_path):
-                raise RedditPostError(
-                    f"Video file not found: {video_path}",
-                    details={"error_type": "FILE_NOT_FOUND"}
-                )
+                # Upload video to provided URL
+                with open(video_path, 'rb') as video_file:
+                    files = {
+                        'video_file': (path.basename(video_path), video_file, mime_type)
+                    }
+                    for field in lease_data['args']:
+                        if field['name'] != 'file':
+                            files[field['name']] = (None, field['value'])
 
-            with open(video_path, 'rb') as video_file:
-                try:
-                    logger.info(f"Submitting video to r/{subreddit}")
-                    submission = subreddit_obj.submit_video(
-                        title=title,
-                        video_path=video_path,
-                        thumbnail_path=thumbnail_path,
-                        nsfw=nsfw,
-                        spoiler=spoiler,
-                        flair_id=flair_id,
-                        flair_text=flair_text,
-                        timeout=300  # 5 minutes timeout for large videos
+                    upload_response = requests.post(
+                        lease_data['args']['action'],
+                        files=files,
+                        timeout=300
                     )
-                    logger.info(f"Video submission created: {submission.permalink}")
-                    return submission
+                    upload_response.raise_for_status()
 
-                except Exception as e:
-                    raise RedditPostError(
-                        f"Failed to submit video: {str(e)}",
-                        details={"error_type": "SUBMISSION_FAILED", "error": str(e)}
-                    ) from e
+                # Step 3: Submit post with uploaded video
+                logger.info("Creating Reddit post...")
+                await self._report_progress(ctx, {"status": "posting", "message": "Creating post..."})
+
+                submission_url = 'https://oauth.reddit.com/api/submit'
+                submission_data = {
+                    'api_type': 'json',
+                    'kind': 'video',
+                    'title': title,
+                    'sr': subreddit,
+                    'nsfw': nsfw,
+                    'spoiler': spoiler,
+                    'video_poster_url': thumbnail_path if thumbnail_path else '',
+                    'url': lease_data['asset']['ws_url'],
+                    'videogif': False,
+                    'flair_id': flair_id if flair_id else '',
+                    'flair_text': flair_text if flair_text else ''
+                }
+
+                submission_response = requests.post(
+                    submission_url,
+                    headers=headers,
+                    data=submission_data,
+                    timeout=30
+                )
+                submission_response.raise_for_status()
+                submission_data = submission_response.json()
+
+                if 'json' not in submission_data or 'errors' in submission_data['json'] and submission_data['json']['errors']:
+                    raise RedditPostError(f"Submission failed: {json.dumps(submission_data['json']['errors'])}")
+
+                # Get the submission using PRAW for convenience
+                submission_id = submission_data['json']['data']['id']
+                submission = self.manager.client.submission(submission_id)
+                
+                logger.info(f"Video post created successfully: {submission.permalink}")
+                return submission
+
+            except requests.RequestException as e:
+                raise RedditPostError(f"Network error during upload: {str(e)}")
+            except Exception as e:
+                raise RedditPostError(f"Error during video upload: {str(e)}")
                 raise RedditPostError(
                     f"Failed to get upload lease: {lease_result}",
                     details={"error_type": "LEASE_FAILED", "response": lease_result}
