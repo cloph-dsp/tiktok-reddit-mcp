@@ -197,17 +197,64 @@ class RedditService:
                     'video': ('video.mp4', video_file, 'video/mp4')
                 }
 
-                logger.info("Creating Reddit post...")
-                await self._report_progress(ctx, {"status": "posting", "message": "Creating post..."})
+                # Step 1: Get upload lease
+                logger.info("Getting upload lease...")
+                await self._report_progress(ctx, {"status": "uploading", "message": "Getting upload lease..."})
                 
                 try:
+                    # Get the upload lease from Reddit
+                    lease_response = requests.post(
+                        'https://oauth.reddit.com/api/media/asset.json',
+                        headers=headers,
+                        data={
+                            'filepath': os.path.basename(video_path),
+                            'mimetype': 'video/mp4'
+                        },
+                        timeout=30
+                    )
+                    lease_response.raise_for_status()
+                    lease_data = lease_response.json()
+
+                    if not lease_data.get('args'):
+                        raise RedditPostError("Failed to get upload lease - no args in response")
+
+                    # Step 2: Upload to S3
+                    logger.info("Uploading video to Reddit's storage...")
+                    await self._report_progress(ctx, {"status": "uploading", "message": "Uploading video..."})
+
+                    upload_url = lease_data['args']['action']
+                    upload_fields = {k: v for k, v in lease_data['args'].items() if k != 'action'}
+                    
+                    # Prepare the upload form
+                    with open(video_path, 'rb') as video_file:
+                        files = {
+                            'file': ('video.mp4', video_file, 'video/mp4')
+                        }
+                        upload_response = requests.post(
+                            upload_url,
+                            data=upload_fields,
+                            files=files,
+                            timeout=300
+                        )
+                        upload_response.raise_for_status()
+
+                    # Step 3: Submit the post with the uploaded video
+                    logger.info("Creating Reddit post...")
+                    await self._report_progress(ctx, {"status": "posting", "message": "Creating post..."})
+
+                    # Update submit_data with the uploaded video details
+                    submit_data.update({
+                        'kind': 'video',
+                        'url': lease_data['asset']['websocket_url'],
+                        'video_poster_url': lease_data['asset']['websocket_url']
+                    })
+
                     # Submit the post
                     response = requests.post(
                         'https://oauth.reddit.com/api/submit',
                         headers=headers,
                         data=submit_data,
-                        files=files,
-                        timeout=300
+                        timeout=60
                     )
 
                     response.raise_for_status()
