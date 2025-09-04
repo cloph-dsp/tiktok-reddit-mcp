@@ -190,7 +190,7 @@ class RedditService:
             }
 
             upload_response = requests.post(
-                'https://oauth.reddit.com/api/v1/upload/asset.json',
+                'https://oauth.reddit.com/api/media/asset.json',
                 headers=upload_headers,
                 json=upload_data,
                 timeout=30
@@ -236,7 +236,7 @@ class RedditService:
                 }
 
                 thumb_upload_response = requests.post(
-                    'https://oauth.reddit.com/api/v1/upload/asset.json',
+                    'https://oauth.reddit.com/api/media/asset.json',
                     headers=upload_headers,
                     json=thumb_upload_data,
                     timeout=30
