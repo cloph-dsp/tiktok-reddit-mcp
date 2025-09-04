@@ -635,6 +635,7 @@ class RedditService:
 
         # Additional authentication check
         if not self.manager.check_user_auth():
+            raise RuntimeError("Reddit user authentication failed. Please check your credentials.")
 
         clean_subreddit = subreddit[2:] if subreddit.startswith("r/") else subreddit
         
