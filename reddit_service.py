@@ -230,13 +230,10 @@ class RedditService:
                     
                     # Prepare the upload form
                     with open(video_path, 'rb') as video_file:
-                        files = {
-                            'file': ('video.mp4', video_file, 'video/mp4')
-                        }
+                        upload_fields['file'] = ('video.mp4', video_file, 'video/mp4')
                         upload_response = requests.post(
                             upload_url,
-                            data=upload_fields,
-                            files=files,
+                            files=upload_fields,
                             timeout=300
                         )
                         upload_response.raise_for_status()
@@ -249,17 +246,37 @@ class RedditService:
                     submit_data['kind'] = 'video'
                     submit_data['url'] = lease_data['asset']['websocket_url']
                     
-                    # The 'files' parameter should NOT be used here
-                    response = requests.post(
-                        'https://oauth.reddit.com/api/submit',
-                        headers=headers,
-                        data=submit_data,
-                        timeout=60
-                    )
+                    # Retry logic for submission
+                    max_retries = 3
+                    retry_delay = 5  # seconds
+                    for attempt in range(max_retries):
+                        try:
+                            # The 'files' parameter should NOT be used here
+                            response = requests.post(
+                                'https://oauth.reddit.com/api/submit',
+                                headers=headers,
+                                data=submit_data,
+                                timeout=60
+                            )
+                            response.raise_for_status()
+                            result = response.json()
 
-                    response.raise_for_status()
-                    result = response.json()
+                            if 'json' not in result or ('errors' in result['json'] and result['json']['errors']):
+                                # This is a validation error from Reddit, not a network error, so don't retry.
+                                raise RedditPostError(f"Failed to submit post: {json.dumps(result['json']['errors'])}")
+                            
 
+                            # Success, break the loop
+                            break
+                        except requests.RequestException as e:
+                            if attempt < max_retries - 1:
+                                logger.warning(f"Submission failed (attempt {attempt + 1}/{max_retries}). Retrying in {retry_delay}s... Error: {e}")
+                                await self._report_progress(ctx, {"status": "posting", "message": f"Submission failed. Retrying in {retry_delay}s..."})
+                                time.sleep(retry_delay)
+                            else:
+                                # All retries failed
+                                raise
+                    
                     if 'json' not in result or 'errors' in result['json'] and result['json']['errors']:
                         raise RedditPostError(f"Failed to submit post: {json.dumps(result['json']['errors'])}")
 
@@ -618,26 +635,6 @@ class RedditService:
 
         # Additional authentication check
         if not self.manager.check_user_auth():
-            raise RuntimeError(
-                "Reddit client authentication failed. Video submission requires authenticated access. "
-                "Please check your REDDIT_USERNAME, REDDIT_PASSWORD, REDDIT_CLIENT_ID, and REDDIT_CLIENT_SECRET "
-                "environment variables."
-            )
-
-        # Input validation
-        if not subreddit or not isinstance(subreddit, str):
-            raise ValueError("Subreddit name is required")
-        if not title or not isinstance(title, str):
-            raise ValueError("Post title is required")
-        if len(title) > 300:
-            raise ValueError("Title must be 300 characters or less")
-        if not video_path and (not content or not isinstance(content, str)):
-            raise ValueError("Post content/URL is required for non-video posts")
-
-        # CRITICAL: If video_path is provided, is_self should be False
-        if video_path and is_self:
-            logger.warning(f"Video path provided but is_self=True. Setting is_self=False for video post.")
-            is_self = False
 
         clean_subreddit = subreddit[2:] if subreddit.startswith("r/") else subreddit
         
