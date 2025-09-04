@@ -6,6 +6,7 @@ from datetime import datetime
 from os import getenv, path, remove
 from typing import Any, Dict, List, Optional
 import praw  # type: ignore
+import requests
 from utils import (
     _format_timestamp,
     _format_post,
@@ -141,115 +142,187 @@ class RedditService:
 
         logger.info(f"Video validation passed: {video_path} ({file_size} bytes, {file_ext})")
 
-        # Step 2: Upload video to Reddit's media server (single attempt)
-        await self._report_progress(ctx, {"status": "uploading", "message": "Uploading video to Reddit..."})
+        # Step 2: Implement the full multi-step video upload process
+        logger.info(f"Creating Reddit video post in r/{subreddit} with title: {title[:50]}...")
+        await self._report_progress(ctx, {"status": "posting_video", "message": f"Creating video post in r/{subreddit}"})
 
         try:
-            logger.info("Starting video upload (single attempt)")
+            # Step 2.1: Get upload lease from Reddit
+            logger.info("Step 1: Getting upload lease from Reddit...")
+            await self._report_progress(ctx, {"status": "uploading", "message": "Getting upload lease..."})
 
-            # Use PRAW's built-in media upload method instead of direct requests
-            logger.info(f"Uploading video file ({file_size} bytes) using PRAW...")
-            video_url = self.manager.client.subreddit(subreddit)._upload_media(
-                expected_mime_prefix="video",
-                media_path=video_path
-            )
+            # Get Reddit credentials
+            client_id = getenv('REDDIT_CLIENT_ID')
+            client_secret = getenv('REDDIT_CLIENT_SECRET')
+            username = getenv('REDDIT_USERNAME')
+            password = getenv('REDDIT_PASSWORD')
 
-            # Extract asset ID from the returned URL
-            # PRAW returns the full URL, we need to extract the asset ID
-            if '/asset/' in video_url:
-                video_asset_id = video_url.split('/asset/')[1].split('/')[0]
-            else:
-                # Fallback: try to extract from URL pattern
-                import re
-                match = re.search(r'/([a-zA-Z0-9]+)/video\.mp4', video_url)
-                video_asset_id = match.group(1) if match else 'unknown'
-
-            logger.info(f"Video uploaded successfully, asset ID: {video_asset_id}, URL: {video_url}")
-
-        except Exception as upload_error:
-            logger.error(f"Video upload failed: {upload_error}")
-            raise RedditPostError(
-                f"Failed to upload video: {upload_error}",
-                details={"error_type": "UPLOAD_FAILED", "error": str(upload_error)}
-            )
-
-        # Step 2: Upload thumbnail if provided
-        thumbnail_asset_id = None
-        if thumbnail_path and path.exists(thumbnail_path):
-            try:
-                await self._report_progress(ctx, {"status": "uploading", "message": "Uploading thumbnail..."})
-
-                logger.info("Uploading thumbnail using PRAW...")
-
-                # Use PRAW's built-in media upload method for thumbnail
-                thumb_url = self.manager.client.subreddit(subreddit)._upload_media(
-                    expected_mime_prefix="image",
-                    media_path=thumbnail_path
+            if not all([client_id, client_secret, username, password]):
+                raise RedditPostError(
+                    "Reddit API credentials not available for video upload",
+                    details={"error_type": "MISSING_CREDENTIALS"}
                 )
 
-                # Extract asset ID from the returned URL
-                if '/asset/' in thumb_url:
-                    thumbnail_asset_id = thumb_url.split('/asset/')[1].split('/')[0]
-                else:
-                    # Fallback: try to extract from URL pattern
-                    import re
-                    match = re.search(r'/([a-zA-Z0-9]+)/', thumb_url)
-                    thumbnail_asset_id = match.group(1) if match else 'unknown'
+            # Get OAuth2 access token
+            auth = requests.auth.HTTPBasicAuth(client_id, client_secret)
+            data = {'grant_type': 'password', 'username': username, 'password': password}
+            headers = {'User-Agent': 'RedditMCP/1.0'}
 
-                logger.info(f"Thumbnail uploaded successfully, asset ID: {thumbnail_asset_id}")
+            token_response = requests.post('https://www.reddit.com/api/v1/access_token',
+                                          auth=auth, data=data, headers=headers, timeout=30)
+            token_response.raise_for_status()
+            token_data = token_response.json()
+            access_token = token_data['access_token']
 
-            except Exception as e:
-                logger.warning(f"Failed to upload thumbnail: {e}")
-                # Continue without thumbnail
+            upload_headers = {
+                'Authorization': f'bearer {access_token}',
+                'User-Agent': 'RedditMCP/1.0'
+            }
 
-        # Step 3: Create the post
-        logger.info(f"Creating Reddit post in r/{subreddit} with title: {title[:50]}...")
-        await self._report_progress(ctx, {"status": "posting_video", "message": f"Creating post in r/{subreddit}"})
-
-        try:
-            submit_data = {
-                'sr': subreddit,
+            # Get upload lease
+            lease_data = {
+                'api_type': 'json',
+                'video_type': 'file',
                 'title': title,
+                'subreddit': subreddit,
+                'url': ''
+            }
+
+            lease_response = requests.post(
+                'https://oauth.reddit.com/api/v1/subreddit/submit_video',
+                headers=upload_headers,
+                data=lease_data,
+                timeout=30
+            )
+            lease_response.raise_for_status()
+            lease_result = lease_response.json()
+
+            if lease_result.get('success') != True:
+                raise RedditPostError(
+                    f"Failed to get upload lease: {lease_result}",
+                    details={"error_type": "LEASE_FAILED", "response": lease_result}
+                )
+
+            # Extract upload information
+            upload_info = lease_result['jquery'][10][3][0]['data']
+            upload_url = upload_info['uploadURL']
+            upload_fields = upload_info['uploadFields']
+            websocket_url = upload_info['websocketURL']
+
+            logger.info(f"Got upload lease successfully. Upload URL: {upload_url}")
+
+            # Step 2.2: Upload video file
+            logger.info("Step 2: Uploading video file...")
+            await self._report_progress(ctx, {"status": "uploading", "message": "Uploading video file..."})
+
+            # Prepare form data
+            form_data = {field['name']: field['value'] for field in upload_fields}
+            form_data['file'] = (path.basename(video_path), open(video_path, 'rb'), 'video/mp4')
+
+            # Upload video
+            upload_response = requests.post(upload_url, data=form_data, timeout=120)
+            upload_response.raise_for_status()
+
+            logger.info("Video file uploaded successfully")
+
+            # Step 2.3: Upload thumbnail if provided
+            thumbnail_websocket_url = None
+            if thumbnail_path and path.exists(thumbnail_path):
+                logger.info("Step 3: Uploading thumbnail...")
+                await self._report_progress(ctx, {"status": "uploading", "message": "Uploading thumbnail..."})
+
+                # Get thumbnail upload lease
+                thumb_lease_data = {
+                    'api_type': 'json',
+                    'video_type': 'thumbnail',
+                    'title': title,
+                    'subreddit': subreddit,
+                    'url': ''
+                }
+
+                thumb_lease_response = requests.post(
+                    'https://oauth.reddit.com/api/v1/subreddit/submit_video',
+                    headers=upload_headers,
+                    data=thumb_lease_data,
+                    timeout=30
+                )
+                thumb_lease_response.raise_for_status()
+                thumb_lease_result = thumb_lease_response.json()
+
+                if thumb_lease_result.get('success') == True:
+                    thumb_upload_info = thumb_lease_result['jquery'][10][3][0]['data']
+                    thumb_upload_url = thumb_upload_info['uploadURL']
+                    thumb_upload_fields = thumb_upload_info['uploadFields']
+                    thumbnail_websocket_url = thumb_upload_info['websocketURL']
+
+                    # Upload thumbnail
+                    thumb_form_data = {field['name']: field['value'] for field in thumb_upload_fields}
+                    thumb_form_data['file'] = (path.basename(thumbnail_path), open(thumbnail_path, 'rb'), 'image/jpeg')
+
+                    thumb_upload_response = requests.post(thumb_upload_url, data=thumb_form_data, timeout=60)
+                    thumb_upload_response.raise_for_status()
+
+                    logger.info("Thumbnail uploaded successfully")
+                else:
+                    logger.warning("Failed to get thumbnail upload lease, continuing without thumbnail")
+
+            # Step 2.4: Submit the post
+            logger.info("Step 4: Submitting video post...")
+            await self._report_progress(ctx, {"status": "posting_video", "message": "Submitting video post..."})
+
+            submit_data = {
+                'api_type': 'json',
                 'kind': 'video',
-                'video_poster_url': f'https://reddit-uploaded-media.s3-accelerate.amazonaws.com/{video_asset_id}/poster.jpg' if thumbnail_asset_id else None,
-                'url': f'https://reddit-uploaded-media.s3-accelerate.amazonaws.com/{video_asset_id}/video.mp4',
-                'sendreplies': True
+                'title': title,
+                'sr': subreddit,
+                'url': websocket_url,  # Use websocket URL from lease
+                'sendreplies': 'true'
             }
 
             if nsfw:
-                submit_data['nsfw'] = True
-                logger.info("Post marked as NSFW")
+                submit_data['nsfw'] = 'true'
             if spoiler:
-                submit_data['spoiler'] = True
-                logger.info("Post marked as spoiler")
+                submit_data['spoiler'] = 'true'
             if flair_id:
                 submit_data['flair_id'] = flair_id
-                logger.info(f"Post flair ID: {flair_id}")
             if flair_text:
                 submit_data['flair_text'] = flair_text
-                logger.info(f"Post flair text: {flair_text}")
 
-            logger.info(f"Submitting post data: {submit_data}")
-
-            # Use PRAW's submit method instead of direct API call
-            logger.info("Using PRAW's submit method for post creation...")
-            submission = self.manager.client.subreddit(subreddit).submit(
-                title=title,
-                url=video_url,
-                nsfw=nsfw,
-                spoiler=spoiler,
-                flair_id=flair_id,
-                flair_text=flair_text,
-                send_replies=True
+            submit_response = requests.post(
+                'https://oauth.reddit.com/api/submit',
+                headers=upload_headers,
+                data=submit_data,
+                timeout=30
             )
-            logger.info(f"Post created successfully with ID: {submission.id}")
-            logger.info(f"Post URL: {submission.permalink}")
+            submit_response.raise_for_status()
+            submit_result = submit_response.json()
+
+            if submit_result.get('success') != True:
+                raise RedditPostError(
+                    f"Failed to submit video post: {submit_result}",
+                    details={"error_type": "SUBMIT_FAILED", "response": submit_result}
+                )
+
+            # Extract post information
+            post_data = submit_result['jquery'][10][3][0]['data']
+            post_id = post_data['id']
+            post_name = post_data['name']
+
+            logger.info(f"Video post submitted successfully with ID: {post_id}")
+
+            # Get the PRAW submission object
+            submission = self.manager.client.submission(id=post_id)
+
+            logger.info(f"Retrieved PRAW submission object: {submission.permalink}")
+            logger.info(f"Post type: {'video' if hasattr(submission, 'is_video') and submission.is_video else 'unknown'}")
+
             return submission
 
         except Exception as e:
+            logger.error(f"Failed to create video post: {e}")
             raise RedditPostError(
-                f"Failed to create post: {e}",
-                details={"error_type": "POST_CREATION_FAILED", "original_error": str(e)}
+                f"Failed to create video post: {e}",
+                details={"error_type": "VIDEO_POST_CREATION_FAILED", "original_error": str(e)}
             )
 
     async def _report_progress(self, ctx: Any, data: Dict[str, Any]) -> None:
