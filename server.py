@@ -480,46 +480,68 @@ async def _post_downloaded_video_async_impl(
     report_progress = create_progress_reporter(ctx)
     report_progress({"status": "posting_video", "message": "Attempting to create Reddit post..."})
 
-    # Transcode video to Reddit-safe format
+    # Transcode video to Reddit-safe format (always transcode for compatibility)
     logger.info("Step 6: Starting video transcoding...")
     transcoded_video_path = None
     transcoding_info = None
     try:
         report_progress({"status": "transcoding", "message": "Transcoding video to Reddit-safe format..."})
         logger.info("Starting video transcoding...")
-        # Check if video is already in a compatible format to skip transcoding
-        logger.info("Checking if transcoding is needed...")
-        video_ext = path.splitext(video_path)[1].lower()
-        compatible_formats = {'.mp4'}
 
-        if video_ext in compatible_formats:
-            logger.info(f"Video is already in compatible format ({video_ext}), skipping transcoding")
-            transcoded_video_path = video_path
-            transcoding_info = {"skipped": True, "reason": "Already in compatible format"}
-            report_progress({"status": "transcoding", "message": "Video format already compatible, skipping transcoding"})
+        # Always transcode to ensure Reddit compatibility, even for MP4 files
+        # as they may have incompatible codecs, resolutions, or other issues
+        logger.info("Forcing transcoding to ensure Reddit compatibility...")
+
+        # Check if transcoded version already exists
+        base_name = path.splitext(path.basename(video_path))[0]
+        transcoded_path = path.join("transcoded", f"{base_name}_reddit_safe.mp4")
+
+        if path.exists(transcoded_path):
+            # Verify the existing transcoded file is still valid
+            try:
+                transcoded_size = path.getsize(transcoded_path)
+                if transcoded_size > 0:
+                    logger.info(f"Found existing valid transcoded video: {transcoded_path} ({transcoded_size} bytes)")
+                    transcoded_video_path = transcoded_path
+                    transcoding_info = {"skipped": True, "reason": "Using existing transcoded file"}
+                    report_progress({"status": "transcoding", "message": "Using existing transcoded video"})
+                else:
+                    logger.warning(f"Existing transcoded file is empty, re-transcoding: {transcoded_path}")
+                    # Remove empty file and re-transcode
+                    remove(transcoded_path)
+                    raise FileNotFoundError("Empty transcoded file")
+            except (OSError, FileNotFoundError):
+                logger.info(f"Existing transcoded file invalid, re-transcoding: {transcoded_path}")
+                # File doesn't exist or is invalid, proceed with transcoding
         else:
-            logger.info(f"Video needs transcoding from {video_ext} to MP4")
-            # Check if transcoded version already exists
-            base_name = path.splitext(path.basename(video_path))[0]
-            transcoded_path = path.join("transcoded", f"{base_name}_reddit_safe.mp4")
-            if path.exists(transcoded_path):
-                logger.info(f"Found existing transcoded video: {transcoded_path}")
-                transcoded_video_path = transcoded_path
-                transcoding_info = {"skipped": True, "reason": "Using existing transcoded file"}
-                report_progress({"status": "transcoding", "message": "Using existing transcoded video"})
-            else:
-                transcoding_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
-                if transcoding_result is None:
-                    raise ValueError("Could not transcode video.")
-                transcoded_video_path = transcoding_result["transcoded_path"]
-                transcoding_info = transcoding_result
-                report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
-                logger.info(f"Video transcoding result: {transcoding_result}")
-                logger.info(f"Video transcoded to Reddit-safe format: {transcoded_video_path}")
+            logger.info(f"No existing transcoded file found, transcoding: {video_path}")
+
+        # Perform transcoding if we don't have a valid transcoded file
+        if transcoded_video_path is None:
+            transcoding_result = await video_service.transcode_to_reddit_safe(ctx, video_path, "transcoded")
+            if transcoding_result is None:
+                raise ValueError("Could not transcode video.")
+            transcoded_video_path = transcoding_result["transcoded_path"]
+            transcoding_info = transcoding_result
+            report_progress({"status": "transcoding", "message": "Video transcoding completed successfully"})
+            logger.info(f"Video transcoding result: {transcoding_result}")
+            logger.info(f"Video transcoded to Reddit-safe format: {transcoded_video_path}")
+
+            # Validate the transcoded file
+            if not path.exists(transcoded_video_path):
+                raise ValueError(f"Transcoded video file not found: {transcoded_video_path}")
+
+            transcoded_size = path.getsize(transcoded_video_path)
+            if transcoded_size == 0:
+                raise ValueError(f"Transcoded video file is empty: {transcoded_video_path}")
+
+            logger.info(f"Transcoded video validation passed: {transcoded_size} bytes")
+
     except Exception as e:
         logger.error(f"Error during video transcoding: {e}")
         report_progress({"status": "error", "message": f"Video transcoding failed: {e}"})
-        # If transcoding fails, we'll try to upload the original video
+        # If transcoding fails, we'll try to upload the original video as fallback
+        logger.warning("Falling back to original video file for upload")
         transcoded_video_path = video_path
         report_progress({"status": "warning", "message": "Using original video file for upload (transcoding failed)"})
 

@@ -356,12 +356,31 @@ class RedditService:
 
                             except praw.exceptions.WebSocketException as ws_error:
                                 logger.error(f"WebSocket error during video submission: {ws_error}")
-                                raise RedditPostError(
-                                    f"Video upload failed due to WebSocket error: {ws_error}. "
-                                    "This usually indicates an issue with the video file format, corruption, or Reddit's media servers. "
-                                    "Try re-downloading the video or check if the video format is supported.",
-                                    details={"error_type": "WEBSOCKET_ERROR", "original_error": str(ws_error), "video_path": video_path}
-                                ) from ws_error
+                                # Check if this is a recoverable WebSocket error
+                                error_msg = str(ws_error).lower()
+                                recoverable_errors = [
+                                    "websocket error",
+                                    "connection closed",
+                                    "timeout",
+                                    "network error",
+                                    "temporary failure"
+                                ]
+
+                                is_recoverable = any(recoverable in error_msg for recoverable in recoverable_errors)
+
+                                if is_recoverable and attempt < max_retries:
+                                    logger.warning(f"Recoverable WebSocket error, will retry: {ws_error}")
+                                    await self._report_progress(ctx, {"status": "retry", "message": f"WebSocket error, retrying in 5s (attempt {attempt+1}/{max_retries})"})
+                                    await asyncio.sleep(5)  # Wait before retry
+                                    continue  # Continue to next attempt
+                                else:
+                                    # Non-recoverable or max retries reached
+                                    raise RedditPostError(
+                                        f"Video upload failed due to WebSocket error: {ws_error}. "
+                                        "This usually indicates an issue with the video file format, corruption, or Reddit's media servers. "
+                                        "Try re-downloading the video or check if the video format is supported.",
+                                        details={"error_type": "WEBSOCKET_ERROR", "original_error": str(ws_error), "video_path": video_path, "recoverable": is_recoverable}
+                                    ) from ws_error
                             except Exception as submit_error:
                                 logger.error(f"Video submission failed with error: {submit_error}")
                                 # Re-raise with more context
@@ -374,11 +393,23 @@ class RedditService:
                             break
                         except praw.exceptions.WebSocketException as ws_exc:
                             logger.warning(f"WebSocket error during video submission (attempt {attempt}): {ws_exc}")
-                            if attempt < max_retries:
-                                logger.info("Retrying video submission...")
+                            error_msg = str(ws_exc).lower()
+                            recoverable_errors = [
+                                "websocket error",
+                                "connection closed",
+                                "timeout",
+                                "network error",
+                                "temporary failure"
+                            ]
+
+                            is_recoverable = any(recoverable in error_msg for recoverable in recoverable_errors)
+
+                            if is_recoverable and attempt < max_retries:
+                                logger.info("Retrying video submission after recoverable WebSocket error...")
+                                await self._report_progress(ctx, {"status": "retry", "message": f"WebSocket error, retrying (attempt {attempt+1}/{max_retries})"})
                                 await asyncio.sleep(2 ** attempt)  # Exponential backoff
                             else:
-                                logger.error("Max retries reached for WebSocket error.")
+                                logger.error("Max retries reached for WebSocket error or error is not recoverable.")
                                 await self._report_progress(ctx, {"status": "error", "message": f"WebSocket error after {max_retries} attempts: {ws_exc}"})
                                 # Don't raise immediately, try to find the post
                                 submission = None

@@ -11,6 +11,7 @@ from urllib.parse import urlparse, urlunparse
 import yt_dlp
 import yt_dlp.utils
 import requests
+import platform
 
 # Import custom exceptions
 from exceptions import VideoDownloadError
@@ -20,6 +21,61 @@ logger = logging.getLogger(__name__)
 
 class VideoService:
     """Encapsulates video download and processing logic."""
+
+    def _get_ffmpeg_paths(self) -> tuple[str, str]:
+        """Get the full paths to ffmpeg and ffprobe executables.
+
+        Returns:
+            Tuple of (ffmpeg_path, ffprobe_path)
+        """
+        system = platform.system().lower()
+
+        if system == "windows":
+            # Check common Windows FFmpeg locations
+            possible_paths = [
+                "E:\\ffmpeg\\bin\\ffmpeg.exe",
+                "E:\\ffmpeg\\bin\\ffprobe.exe",
+                "C:\\ffmpeg\\bin\\ffmpeg.exe",
+                "C:\\ffmpeg\\bin\\ffprobe.exe",
+                "ffmpeg.exe",  # Fallback to PATH
+                "ffprobe.exe"  # Fallback to PATH
+            ]
+        else:
+            # Linux/Unix systems
+            possible_paths = [
+                "/usr/bin/ffmpeg",
+                "/usr/bin/ffprobe",
+                "/usr/local/bin/ffmpeg",
+                "/usr/local/bin/ffprobe",
+                "ffmpeg",  # Fallback to PATH
+                "ffprobe"  # Fallback to PATH
+            ]
+
+        ffmpeg_path = None
+        ffprobe_path = None
+
+        for i in range(0, len(possible_paths), 2):
+            ffmpeg_candidate = possible_paths[i]
+            ffprobe_candidate = possible_paths[i + 1] if i + 1 < len(possible_paths) else possible_paths[i].replace('ffmpeg', 'ffprobe')
+
+            if path.exists(ffmpeg_candidate):
+                ffmpeg_path = ffmpeg_candidate
+            if path.exists(ffprobe_candidate):
+                ffprobe_path = ffprobe_candidate
+
+            if ffmpeg_path and ffprobe_path:
+                break
+
+        # Default fallbacks if not found
+        if not ffmpeg_path:
+            ffmpeg_path = "ffmpeg"
+        if not ffprobe_path:
+            ffprobe_path = "ffprobe"
+
+        logger.info(f"Using FFmpeg: {ffmpeg_path}")
+        logger.info(f"Using FFprobe: {ffprobe_path}")
+
+        return ffmpeg_path, ffprobe_path
 
     async def download_tiktok_video(self, ctx: Any, url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
         """Download a TikTok video using yt-dlp (thumbnail discarded immediately).
@@ -415,6 +471,11 @@ class VideoService:
             if file_size < 1024:  # Less than 1KB
                 raise VideoDownloadError(f"Video file suspiciously small: {file_size} bytes")
 
+            # Check Reddit's file size limit (1GB)
+            max_reddit_size = 1024 * 1024 * 1024  # 1GB
+            if file_size > max_reddit_size:
+                raise VideoDownloadError(f"Video file too large for Reddit: {file_size} bytes > {max_reddit_size} bytes")
+
         except OSError as e:
             raise VideoDownloadError(f"Cannot get file size: {e}") from e
 
@@ -454,26 +515,185 @@ class VideoService:
         except Exception as e:
             raise VideoDownloadError(f"Video file validation failed: {e}") from e
 
-        # Optional: Try to get basic video info with ffprobe if available
+        # Enhanced: Try to get detailed video info with ffprobe for Reddit compatibility
         try:
+            ffmpeg_path, ffprobe_path = self._get_ffmpeg_paths()
             ffprobe_cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
+                ffprobe_path, "-v", "quiet", "-print_format", "json",
                 "-show_format", "-show_streams", video_path
             ]
-            result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=15)
 
             if result.returncode == 0:
                 video_info = json.loads(result.stdout)
-                logger.info(f"Video validation successful - Duration: {video_info.get('format', {}).get('duration', 'unknown')}s")
+                format_info = video_info.get('format', {})
+                streams = video_info.get('streams', [])
+
+                # Log video details
+                duration = format_info.get('duration', 'unknown')
+                bitrate = format_info.get('bit_rate', 'unknown')
+                size = format_info.get('size', 'unknown')
+                logger.info(f"Video validation - Duration: {duration}s, Bitrate: {bitrate}, Size: {size}")
+
+                # Check for video stream
+                video_stream = None
+                audio_stream = None
+                for stream in streams:
+                    if stream.get('codec_type') == 'video':
+                        video_stream = stream
+                    elif stream.get('codec_type') == 'audio':
+                        audio_stream = stream
+
+                if not video_stream:
+                    raise VideoDownloadError(f"No video stream found in file: {video_path}")
+
+                # Check video codec compatibility with Reddit
+                video_codec = video_stream.get('codec_name', '').lower()
+                reddit_supported_video_codecs = {'h264', 'avc1', 'h265', 'hevc'}
+
+                if video_codec not in reddit_supported_video_codecs:
+                    logger.warning(f"Video codec {video_codec} may not be supported by Reddit. Supported: {reddit_supported_video_codecs}")
+
+                # Check video dimensions (Reddit prefers certain resolutions)
+                width = video_stream.get('width', 0)
+                height = video_stream.get('height', 0)
+                if width > 0 and height > 0:
+                    logger.info(f"Video resolution: {width}x{height}")
+                    # Reddit supports up to 1080p, warn for higher
+                    if width > 1920 or height > 1080:
+                        logger.warning(f"Video resolution {width}x{height} exceeds 1080p, may need downscaling")
+
+                # Check audio codec if present
+                if audio_stream:
+                    audio_codec = audio_stream.get('codec_name', '').lower()
+                    reddit_supported_audio_codecs = {'aac', 'mp3', 'opus'}
+                    if audio_codec not in reddit_supported_audio_codecs:
+                        logger.warning(f"Audio codec {audio_codec} may not be supported by Reddit. Supported: {reddit_supported_audio_codecs}")
+
+                logger.info(f"Video validation successful - Duration: {duration}s, Codec: {video_codec}, Resolution: {width}x{height}")
             else:
                 logger.warning(f"ffprobe validation failed: {result.stderr}")
-                # Don't fail the whole process if ffprobe isn't available or fails
+                # Check if this might be corruption
+                if "invalid" in result.stderr.lower() or "corrupt" in result.stderr.lower():
+                    logger.warning("Video file may be corrupted based on ffprobe output")
+                    # Try to repair the video
+                    try:
+                        repair_path = video_path + ".repaired.mp4"
+                        repair_success = await self._repair_video_file(video_path, repair_path)
+                        if repair_success and path.exists(repair_path):
+                            logger.info(f"Video repair successful, replacing original: {repair_path}")
+                            # Replace original with repaired version
+                            remove(video_path)
+                            # Use shutil.move for cross-platform compatibility
+                            import shutil
+                            shutil.move(repair_path, video_path)
+                        else:
+                            raise VideoDownloadError(f"Video file appears corrupted and could not be repaired: {video_path}")
+                    except Exception as repair_error:
+                        logger.error(f"Video repair failed: {repair_error}")
+                        raise VideoDownloadError(f"Video file is corrupted and cannot be validated: {video_path}")
+                else:
+                    # Don't fail the whole process if ffprobe isn't available or fails for other reasons
+                    logger.warning("Continuing without detailed ffprobe validation")
 
+        except subprocess.TimeoutExpired:
+            logger.warning("ffprobe validation timed out")
+            # Check for corruption as alternative
+            try:
+                is_corrupted = await self._check_video_corruption(video_path)
+                if is_corrupted:
+                    raise VideoDownloadError(f"Video file validation timed out and corruption detected: {video_path}")
+            except Exception as corruption_check_error:
+                logger.warning(f"Corruption check failed: {corruption_check_error}")
         except Exception as e:
             logger.warning(f"Could not validate video with ffprobe: {e}")
             # Continue without ffprobe validation
 
         logger.info(f"Video validation completed successfully: {video_path}")
+
+    async def _check_video_corruption(self, video_path: str) -> bool:
+        """Check if a video file is corrupted using ffmpeg/ffprobe.
+
+        Args:
+            video_path: Path to the video file to check
+
+        Returns:
+            bool: True if video appears corrupted, False if valid
+        """
+        logger.info(f"Checking video corruption: {video_path}")
+
+        try:
+            # Use ffprobe to check video integrity
+            ffmpeg_path, ffprobe_path = self._get_ffmpeg_paths()
+            ffprobe_cmd = [
+                ffprobe_path, "-v", "error", "-f", "null", "-i", video_path
+            ]
+
+            result = subprocess.run(
+                ffprobe_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                logger.info(f"Video corruption check passed: {video_path}")
+                return False  # Not corrupted
+            else:
+                logger.warning(f"Video corruption detected: {video_path}")
+                logger.warning(f"ffprobe error: {result.stderr}")
+                return True  # Corrupted
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Video corruption check timed out: {video_path}")
+            return True  # Consider timed out as corrupted
+        except Exception as e:
+            logger.warning(f"Error checking video corruption: {e}")
+            return True  # Consider error as corrupted
+
+    async def _repair_video_file(self, video_path: str, output_path: str) -> bool:
+        """Attempt to repair a corrupted video file using ffmpeg.
+
+        Args:
+            video_path: Path to the corrupted video file
+            output_path: Path where to save the repaired video
+
+        Returns:
+            bool: True if repair successful, False otherwise
+        """
+        logger.info(f"Attempting to repair video: {video_path} -> {output_path}")
+
+        try:
+            # Use ffmpeg to copy streams and potentially repair corruption
+            ffmpeg_path, ffprobe_path = self._get_ffmpeg_paths()
+            ffmpeg_cmd = [
+                ffmpeg_path, "-y", "-i", video_path,
+                "-c", "copy",  # Copy streams without re-encoding
+                "-avoid_negative_ts", "make_zero",  # Fix timestamp issues
+                "-fflags", "+discardcorrupt",  # Discard corrupted frames
+                output_path
+            ]
+
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            if result.returncode == 0:
+                logger.info(f"Video repair successful: {output_path}")
+                return True
+            else:
+                logger.warning(f"Video repair failed: {result.stderr}")
+                return False
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Video repair timed out: {video_path}")
+            return False
+        except Exception as e:
+            logger.warning(f"Error repairing video: {e}")
+            return False
 
     def _test_network_connectivity_sync(self) -> None:
         """Test basic network connectivity and DNS resolution (synchronous version).
@@ -644,8 +864,9 @@ class VideoService:
         report_progress({"status": "transcoding", "message": "Analyzing input video..."})
         input_info = {}
         try:
+            ffmpeg_path, ffprobe_path = self._get_ffmpeg_paths()
             ffprobe_cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", video_path
+                ffprobe_path, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", video_path
             ]
             ffprobe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=30)
             if ffprobe_result.returncode != 0:
@@ -671,7 +892,7 @@ class VideoService:
             output_info = {}
             try:
                 ffprobe_cmd = [
-                    "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", output_path
+                    ffprobe_path, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", output_path
                 ]
                 ffprobe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=30)
                 if ffprobe_result.returncode == 0:
@@ -691,7 +912,7 @@ class VideoService:
         # Check if ffmpeg is available
         ffmpeg_available = False
         try:
-            result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
+            result = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True)
             if result.returncode == 0:
                 ffmpeg_available = True
         except Exception:
@@ -715,7 +936,7 @@ class VideoService:
         # - Video: H.264, yuv420p, even dimensions, CRF 23, veryfast preset, +faststart
         # - Audio: AAC, 128k bitrate, 48000 Hz, stereo
         ffmpeg_cmd = [
-            "ffmpeg", "-y", "-i", video_path,
+            ffmpeg_path, "-y", "-i", video_path,
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
             "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",  # Ensure even dimensions
@@ -771,7 +992,7 @@ class VideoService:
             output_info = {}
             try:
                 ffprobe_cmd = [
-                    "ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", output_path
+                    ffprobe_path, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", output_path
                 ]
                 ffprobe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=30)
                 if ffprobe_result.returncode == 0:
