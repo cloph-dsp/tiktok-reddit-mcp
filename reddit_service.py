@@ -230,10 +230,11 @@ class RedditService:
                     
                     # Prepare the upload form
                     with open(video_path, 'rb') as video_file:
-                        upload_fields['file'] = ('video.mp4', video_file, 'video/mp4')
+                        files_for_upload = {'file': ('video.mp4', video_file, 'video/mp4')}
                         upload_response = requests.post(
                             upload_url,
-                            files=upload_fields,
+                            data=upload_fields,
+                            files=files_for_upload,
                             timeout=300
                         )
                         upload_response.raise_for_status()
