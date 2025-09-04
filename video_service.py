@@ -122,12 +122,26 @@ class VideoService:
                         speed_kbps = d['speed'] / 1024
                         progress_message["speed_kbps"] = f"{speed_kbps:.1f} KB/s"
 
-                    asyncio.create_task(report_progress(progress_message))
+                    # Check if there's a running event loop before using asyncio.create_task
+                    try:
+                        asyncio.get_running_loop()
+                        asyncio.create_task(report_progress(progress_message))
+                    except RuntimeError:
+                        # No running event loop, fall back to synchronous logging
+                        logger.info(f"Progress: {progress_message}")
 
             elif d['status'] == 'finished':
-                asyncio.create_task(report_progress({"status": "finished", "message": "Download completed, processing video..."}))
+                try:
+                    asyncio.get_running_loop()
+                    asyncio.create_task(report_progress({"status": "finished", "message": "Download completed, processing video..."}))
+                except RuntimeError:
+                    logger.info("Progress: Download completed, processing video...")
             elif d['status'] == 'error':
-                asyncio.create_task(report_progress({"status": "error", "message": f"Download error: {d.get('errmsg', 'Unknown error')}"}))
+                try:
+                    asyncio.get_running_loop()
+                    asyncio.create_task(report_progress({"status": "error", "message": f"Download error: {d.get('errmsg', 'Unknown error')}"}))
+                except RuntimeError:
+                    logger.error(f"Progress: Download error: {d.get('errmsg', 'Unknown error')}")
 
         original_url = url
         if any(host in url for host in ("vm.tiktok.com", "vt.tiktok.com")):
@@ -616,7 +630,15 @@ class VideoService:
                 logger.info(f"Progress: {data}")
 
         def report_progress(data: Dict[str, Any]) -> None:
-            asyncio.create_task(report_progress_async(data))
+            # Check if there's a running event loop before using asyncio.create_task
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(report_progress_async(data))
+            except RuntimeError:
+                # No running event loop, fall back to synchronous logging
+                status = data.get("status", "unknown")
+                message = data.get("message", "Unknown status")
+                logger.info(f"🔄 PROGRESS [{status.upper()}]: {message}")
 
         # Get input video metadata using ffprobe
         report_progress({"status": "transcoding", "message": "Analyzing input video..."})

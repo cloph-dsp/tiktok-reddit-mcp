@@ -119,10 +119,17 @@ def create_progress_reporter(ctx: Any) -> Callable[[Dict[str, Any]], None]:
             logger.warning(f"Failed to report progress: {e}")
 
     def report_progress(data: Dict[str, Any]) -> None:
-        # Create task and handle it properly
-        task = asyncio.create_task(report_progress_async(data))
-        # Don't wait for completion to avoid blocking, but log if it fails
-        task.add_done_callback(lambda t: logger.warning(f"Progress reporting task failed: {t.exception()}") if t.exception() else None)
+        # Check if there's a running event loop before using asyncio.create_task
+        try:
+            asyncio.get_running_loop()
+            task = asyncio.create_task(report_progress_async(data))
+            # Don't wait for completion to avoid blocking, but log if it fails
+            task.add_done_callback(lambda t: logger.warning(f"Progress reporting task failed: {t.exception()}") if t.exception() else None)
+        except RuntimeError:
+            # No running event loop, fall back to synchronous logging
+            status = data.get("status", "unknown")
+            message = data.get("message", "Unknown status")
+            logger.info(f"🔄 PROGRESS [{status.upper()}]: {message}")
 
     return report_progress
 
