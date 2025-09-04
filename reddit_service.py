@@ -223,6 +223,9 @@ class RedditService:
                     await self._report_progress(ctx, {"status": "uploading", "message": "Uploading video..."})
 
                     upload_url = lease_data['args']['action']
+                    if upload_url.startswith('//'):
+                        upload_url = 'https:' + upload_url
+                        
                     upload_fields = {k: v for k, v in lease_data['args'].items() if k != 'action'}
                     
                     # Prepare the upload form
