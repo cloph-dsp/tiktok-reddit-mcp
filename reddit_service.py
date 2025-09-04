@@ -242,14 +242,11 @@ class RedditService:
                     logger.info("Creating Reddit post...")
                     await self._report_progress(ctx, {"status": "posting", "message": "Creating post..."})
 
-                    # Update submit_data with the uploaded video details
-                    submit_data.update({
-                        'kind': 'video',
-                        'url': lease_data['asset']['websocket_url'],
-                        'video_poster_url': lease_data['asset']['websocket_url']
-                    })
-
-                    # Submit the post
+                    # The 'url' for a video post is the websocket_url from the lease
+                    submit_data['kind'] = 'video'
+                    submit_data['url'] = lease_data['asset']['websocket_url']
+                    
+                    # The 'files' parameter should NOT be used here
                     response = requests.post(
                         'https://oauth.reddit.com/api/submit',
                         headers=headers,
