@@ -20,7 +20,7 @@ A minimal MCP server for downloading TikTok videos, optional transcription, subr
 ### Python Dependencies
 
 ```bash
-pip install praw requests yt-dlp
+pip install praw requests yt-dlp websockets aiohttp aiofiles asyncpraw
 # Optional transcription support
 pip install faster-whisper
 ```
