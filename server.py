@@ -697,3 +697,17 @@ if __name__ == "__main__":
         subprocess.run(mcpo_cmd, env=env, check=True)
     except subprocess.CalledProcessError as e:
         logger.error("mcpo exited with code %s", e.returncode)
+
+async def authenticate_reddit_on_startup():
+    manager = RedditClientManager()
+    await manager.refresh_client()
+    if manager.is_read_only:
+        logger.error("Reddit client is in read-only mode after startup. Check credentials.")
+    else:
+        logger.info("Reddit client authenticated successfully at startup.")
+
+# Run authentication at startup
+try:
+    asyncio.run(authenticate_reddit_on_startup())
+except Exception as e:
+    logger.error(f"Error during Reddit authentication at startup: {e}")
