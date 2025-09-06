@@ -410,6 +410,8 @@ class RedditService:
                 # Auto-comment logic
                 if auto_comment and original_url and post_id:
                     try:
+                        # Wait briefly to ensure Reddit has processed the new submission
+                        await asyncio.sleep(5)
                         # Sanitize the original URL for the comment
                         from utils import sanitize_tiktok_url
                         clean_original_url = sanitize_tiktok_url(original_url)

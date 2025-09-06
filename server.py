@@ -638,21 +638,11 @@ async def _post_downloaded_video_async_impl(
         # Add transcoding info if available
         if transcoding_info:
             result['transcoding_info'] = transcoding_info
-            
-        if comment:
-            logger.info("Step 9: Adding comment to post...")
-            report_progress({"status": "posting_video", "message": "Adding comment to post..."})
-            post_id = post_info['metadata']['id']
-            logger.info(f"Adding comment to post {post_id}...")
-            reply = await reply_to_post(ctx=ctx, post_id=post_id, content=comment)
-            report_progress({"status": "posting_video", "message": "Comment added."})
-            result['comment'] = reply
-            result['comment_language'] = comment_language
-            result['auto_comment_generated'] = auto_comment and original_url and not comment
-            logger.info("Comment added successfully")
-        else:
-            result['comment_language'] = None
-            result['auto_comment_generated'] = False
+
+        # Rely on reddit_service.create_post auto_comment for adding original URL comment
+        # Include metadata indicating whether auto-comment was generated
+        result['comment_language'] = comment_language if auto_comment and original_url else None
+        result['auto_comment_generated'] = bool(auto_comment and original_url)
 
         # Attempt deletion after successful post/comment
         logger.info("Step 10: Cleaning up files...")
