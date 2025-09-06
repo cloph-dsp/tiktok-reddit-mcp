@@ -155,6 +155,8 @@ reddit_manager = RedditClientManager()
 reddit_service = RedditService()
 video_service = VideoService()
 transcription_service = TranscriptionService()
+
+@mcp.tool()
 @require_write_access
 async def create_post(
     ctx: Any,
@@ -204,6 +206,7 @@ async def create_post(
     )
 
 
+@mcp.tool()
 @require_write_access
 async def reply_to_post(
     ctx: Any, post_id: str, content: str, subreddit: Optional[str] = None
@@ -267,6 +270,18 @@ async def transcribe_video(ctx: Any, video_path: str, model_size: str = "small")
         video_path=video_path,
         model_size=model_size
     )
+
+@mcp.tool()
+async def get_subreddit_details(subreddit_name: str) -> Dict[str, Any]:
+    """Get detailed information about a subreddit including rules, flair, and posting permissions.
+
+    Args:
+        subreddit_name: Name of the subreddit (with or without 'r/' prefix)
+
+    Returns:
+        Dictionary containing subreddit information and metadata
+    """
+    return await reddit_service.get_subreddit_details(subreddit_name)
 
 @mcp.tool()
 @require_write_access
@@ -444,8 +459,9 @@ async def _post_downloaded_video_async_impl(
             if subreddit_details is None:
                 raise ValueError("Could not retrieve subreddit details.")
             logger.info(f"Subreddit details retrieved: {subreddit_details}")
-            if not subreddit_details.get("video_posts_allowed", True):
-                raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
+            subreddit_info = subreddit_details.get("subreddit", {})
+            if not subreddit_info.get("video_posts_allowed", True):
+                raise ValueError(f"Subreddit r/{subreddit_info.get('name', subreddit)} does not allow video posts.")
         except Exception as e:
             logger.error(f"Error retrieving subreddit details: {e}")
             raise

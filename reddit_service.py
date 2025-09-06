@@ -542,13 +542,19 @@ class RedditService:
             # Default to allowed if we can't determine
 
         return {
-            "name": sub.display_name,
-            "title": sub.title,  # No longer need await after load()
-            "subscribers": sub.subscribers,  # No longer need await after load()
-            "public_description": sub.public_description,  # No longer need await after load()
-            "flair": flair_templates,
-            "rules": rules,
-            "video_posts_allowed": video_allowed,
+            "subreddit": {
+                "name": sub.display_name,
+                "title": sub.title,
+                "subscribers": sub.subscribers,
+                "public_description": sub.public_description,
+                "flair": flair_templates,
+                "rules": rules,
+                "video_posts_allowed": video_allowed,
+            },
+            "metadata": {
+                "fetched_at": _format_timestamp(time.time()),
+                "subreddit_name": clean_subreddit_name,
+            },
         }
 
     async def suggest_subreddits(
