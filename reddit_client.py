@@ -136,6 +136,7 @@ class RedditClientManager:
 
     async def check_user_auth(self) -> bool:
         """Check if user authentication is valid."""
+        logger.info(f"check_user_auth: Starting authentication check, read_only={self.__class__._is_read_only}")
         if self.__class__._is_read_only:
             logger.warning("check_user_auth: Client is in read-only mode")
             return False
@@ -143,6 +144,7 @@ class RedditClientManager:
             logger.warning("check_user_auth: No client available")
             return False
         try:
+            logger.info("check_user_auth: Calling user.me()...")
             user = await self.__class__._client.user.me()
             if user is None:
                 logger.warning("check_user_auth: user.me() returned None")

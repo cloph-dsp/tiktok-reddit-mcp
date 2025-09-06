@@ -60,6 +60,7 @@ def require_write_access(func: F) -> F:
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        logger.info(f"require_write_access: Checking access for {func.__name__}")
         reddit_manager = RedditClientManager()
         
         # Always try to ensure we have a valid authenticated client
@@ -68,7 +69,7 @@ def require_write_access(func: F) -> F:
             await reddit_manager.initialize_client()
             
         if reddit_manager.is_read_only:
-            logger.error("require_write_access: Reddit client is in read-only mode after initialization")
+            logger.error(f"require_write_access: Reddit client is in read-only mode after initialization for {func.__name__}")
             raise ValueError(
                 "Write operation not allowed in read-only mode. Please check your Reddit credentials."
             )
@@ -76,7 +77,7 @@ def require_write_access(func: F) -> F:
         # Double-check authentication
         auth_check = await reddit_manager.check_user_auth()
         if not auth_check:
-            logger.error("require_write_access: User authentication check failed")
+            logger.error(f"require_write_access: User authentication check failed for {func.__name__}")
             raise Exception(
                 "Authentication required for write operations. "
                 "Please provide valid REDDIT_USERNAME and REDDIT_PASSWORD environment variables."

@@ -152,6 +152,7 @@ class RedditService:
             if not reddit:
                 raise RedditPostError("Reddit client not initialized")
             if self.manager.is_read_only:
+                logger.error("_submit_video_direct: Reddit client is in read-only mode")
                 raise RedditPostError("Reddit client is in read-only mode")
 
             headers = {
