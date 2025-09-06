@@ -83,7 +83,7 @@ class RedditClientManager:
                 self._client = asyncpraw.Reddit(
                     user_agent=user_agent,
                     check_for_updates=False,
-                    read_only=True,
+                    read_only=True
                 )
                 # Test read-only access
                 subreddit = await self._client.subreddit("popular")
@@ -93,11 +93,6 @@ class RedditClientManager:
             except Exception as e:
                 logger.error(f"Error initializing Reddit client: {e}")
                 self._client = None
-                    read_only=True,
-                )
-                return
-
-            # Last resort: read-only without credentials
             logger.info(
                 "Initializing Reddit client in read-only mode without credentials"
             )
