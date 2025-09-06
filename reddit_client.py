@@ -72,7 +72,7 @@ class RedditClientManager:
                         client_secret=client_secret,
                         user_agent=user_agent,
                         check_for_updates=False,
-                        read_only=True,
+                        read_only=True
                     )
                     return
 
