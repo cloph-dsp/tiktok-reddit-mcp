@@ -412,13 +412,36 @@ class RedditService:
                     try:
                         # Wait briefly to ensure Reddit has processed the new submission
                         await asyncio.sleep(5)
-                        # Sanitize the original URL for the comment
+                        # Sanitize the original URL and parse creator username
                         from utils import sanitize_tiktok_url
+                        from urllib.parse import urlparse
                         clean_original_url = sanitize_tiktok_url(original_url)
-                        comment_text = f"Original TikTok: {clean_original_url}"
-                        # Optionally, add language info if needed
-                        if comment_language:
-                            comment_text += f"\n(Language: {comment_language})"
+                        # Extract creator from path (e.g., '/@user/video/...')
+                        parsed = urlparse(clean_original_url)
+                        parts = parsed.path.strip('/').split('/')
+                        creator = parts[0] if parts and parts[0].startswith('@') else None
+                        # Build comment text based on language
+                        lang = (comment_language or '').lower().strip()
+                        if lang in ('en', 'english', 'eng'):
+                            if creator:
+                                comment_text = f"Original TikTok by {creator}: {clean_original_url}"
+                            else:
+                                comment_text = f"Original TikTok: {clean_original_url}"
+                        elif lang in ('pt', 'portuguese', 'pt-br'):
+                            if creator:
+                                comment_text = f"TikTok original de {creator}: {clean_original_url}"
+                            else:
+                                comment_text = f"Link original: {clean_original_url}"
+                        else:
+                            # both
+                            lines = []
+                            if creator:
+                                lines.append(f"Original TikTok by {creator}: {clean_original_url}")
+                                lines.append(f"TikTok original de {creator}: {clean_original_url}")
+                            else:
+                                lines.append(f"Original TikTok: {clean_original_url}")
+                                lines.append(f"Link original: {clean_original_url}")
+                            comment_text = "\n".join(lines)
                         await self.reply_to_post(ctx, post_id, comment_text, subreddit=clean_subreddit)
                         logger.info(f"Auto-commented original TikTok link on post {post_id}")
                     except Exception as comment_error:
