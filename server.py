@@ -700,7 +700,7 @@ if __name__ == "__main__":
 
 async def authenticate_reddit_on_startup():
     manager = RedditClientManager()
-    await manager.refresh_client()
+    await manager.initialize_client()
     if manager.is_read_only:
         logger.error("Reddit client is in read-only mode after startup. Check credentials.")
     else:
