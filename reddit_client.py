@@ -47,13 +47,13 @@ class RedditClientManager:
         username = getenv("REDDIT_USERNAME")
         password = getenv("REDDIT_PASSWORD")
 
-        # Debug logging
-        logger.info(f"Initializing Reddit client with credentials:")
-        logger.info(f"  REDDIT_CLIENT_ID: {'***' if client_id else 'None'}")
-        logger.info(f"  REDDIT_CLIENT_SECRET: {'***' if client_secret else 'None'}")
-        logger.info(f"  REDDIT_USERNAME: {'***' if username else 'None'}")
-        logger.info(f"  REDDIT_PASSWORD: {'***' if password else 'None'}")
-        logger.info(f"  REDDIT_USER_AGENT: {user_agent}")
+    # Debug logging
+    logger.info("Initializing Reddit client with credentials:")
+    logger.info(f"  REDDIT_CLIENT_ID: {client_id}")
+    logger.info(f"  REDDIT_CLIENT_SECRET: {client_secret}")
+    logger.info(f"  REDDIT_USERNAME: {username}")
+    logger.info(f"  REDDIT_PASSWORD: {password}")
+    logger.info(f"  REDDIT_USER_AGENT: {user_agent}")
 
         self._is_read_only = True
 
@@ -81,7 +81,8 @@ class RedditClientManager:
                     self._is_read_only = False
                     return
                 except Exception as auth_error:
-                    logger.warning(f"Authentication failed: {auth_error}")
+                    logger.error(f"Authentication failed: {auth_error}", exc_info=True)
+                    logger.error(f"Credentials used: client_id={client_id}, client_secret={client_secret}, username={username}, password={password}, user_agent={user_agent}")
                     logger.info("Falling back to read-only access")
 
             # Fall back to read-only with client credentials
@@ -107,48 +108,89 @@ class RedditClientManager:
             )
             # Test read-only access
             subreddit = await self._client.subreddit("popular")
+            async def initialize_client(self) -> None:
+                """Initialize the Reddit client with appropriate credentials."""
+                current_time = time.time()
+                if self._client and (current_time - self._last_init_time < self._init_cooldown):
+                    logger.info(f"Client initialization on cooldown. Waiting {self._init_cooldown} seconds between initializations.")
+                    return
+
+                self._last_init_time = current_time
+
+                client_id = getenv("REDDIT_CLIENT_ID")
+                client_secret = getenv("REDDIT_CLIENT_SECRET")
+                user_agent = getenv("REDDIT_USER_AGENT", "RedditMCPServer v1.0")
+                username = getenv("REDDIT_USERNAME")
+                password = getenv("REDDIT_PASSWORD")
+
+                # Debug logging
+                logger.info("Initializing Reddit client with credentials:")
+                logger.info(f"  REDDIT_CLIENT_ID: {client_id}")
+                logger.info(f"  REDDIT_CLIENT_SECRET: {client_secret}")
+                logger.info(f"  REDDIT_USERNAME: {username}")
+                logger.info(f"  REDDIT_PASSWORD: {password}")
+                logger.info(f"  REDDIT_USER_AGENT: {user_agent}")
+
+                self._is_read_only = True
+
+                try:
+                    # Try authenticated access first if credentials are provided
+                    if all([username, password, client_id, client_secret]):
+                        logger.info(
+                            f"Attempting to initialize Reddit client with user authentication for u/{username}"
+                        )
+                        try:
+                            self._client = asyncpraw.Reddit(
+                                client_id=client_id,
+                                client_secret=client_secret,
+                                user_agent=user_agent,
+                                username=username,
+                                password=password,
+                                check_for_updates=False,
+                            )
+                            # Test authentication
+                            user = await self._client.user.me()
+                            if user is None:
+                                raise ValueError(f"Failed to authenticate as u/{username}")
+
+                            logger.info(f"Successfully authenticated as u/{username}")
+                            self._is_read_only = False
+                            return
+                        except Exception as auth_error:
+                            logger.error(f"Authentication failed: {auth_error}", exc_info=True)
+                            logger.error(f"Credentials used: client_id={client_id}, client_secret={client_secret}, username={username}, password={password}, user_agent={user_agent}")
+                            logger.info("Falling back to read-only access")
+
+                    # Fall back to read-only with client credentials
+                    if client_id and client_secret:
+                        logger.info("Initializing Reddit client with read-only access")
+                        self._client = asyncpraw.Reddit(
+                            client_id=client_id,
+                            client_secret=client_secret,
+                            user_agent=user_agent,
+                            check_for_updates=False,
+                            read_only=True,
+                        )
+                        return
+
+                    # Last resort: read-only without credentials
+                    logger.info(
+                        "Initializing Reddit client in read-only mode without credentials"
+                    )
+                    self._client = asyncpraw.Reddit(
+                        user_agent=user_agent,
+                        check_for_updates=False,
+                        read_only=True,
+                    )
+                    # Test read-only access
+                    subreddit = await self._client.subreddit("popular")
+                    async for _ in subreddit.hot(limit=1):
+                        pass
+
+                except Exception as e:
+                    logger.error(f"Error initializing Reddit client: {e}")
             async for _ in subreddit.hot(limit=1):
                 pass
 
         except Exception as e:
             logger.error(f"Error initializing Reddit client: {e}")
-            self._client = None
-
-    async def refresh_client(self) -> None:
-        """Force a refresh of the Reddit client."""
-        logger.info("Refreshing Reddit client.")
-        await self._initialize_client()
-
-    @property
-    async def client(self) -> Optional[asyncpraw.Reddit]:
-        """Get the Reddit client instance."""
-        if self._client is None:
-            await self._initialize_client()
-        return self._client
-
-    @property
-    def is_read_only(self) -> bool:
-        """Check if the client is in read-only mode."""
-        return self._is_read_only
-
-    async def check_user_auth(self) -> bool:
-        """Check if user authentication is available for write operations."""
-        client = await self.client
-        if not client:
-            logger.error("Reddit client not initialized")
-            return False
-        if self._is_read_only:
-            logger.error("Reddit client is in read-only mode")
-            return False
-
-        # Additional authentication check
-        try:
-            user = await client.user.me()
-            if user is None:
-                logger.error("Reddit client user authentication failed - user.me() returned None")
-                return False
-            logger.info(f"Reddit client authenticated as: {user}")
-            return True
-        except Exception as e:
-            logger.error(f"Reddit client authentication check failed: {e}")
-            return False
