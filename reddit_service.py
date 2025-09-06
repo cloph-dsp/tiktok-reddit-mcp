@@ -333,18 +333,21 @@ class RedditService:
             logger.info(f"Progress: {data}")
 
     async def create_post(
-        self,
-        ctx: Any,
-        subreddit: str,
-        title: str,
-        content: Optional[str] = None,
-        is_self: bool = True,
-        video_path: Optional[str] = None,
-        thumbnail_path: Optional[str] = None,
-        nsfw: bool = False,
-        spoiler: bool = False,
-        flair_id: Optional[str] = None,
-        flair_text: Optional[str] = None,
+    self,
+    ctx: Any,
+    subreddit: str,
+    title: str,
+    content: Optional[str] = None,
+    is_self: bool = True,
+    video_path: Optional[str] = None,
+    thumbnail_path: Optional[str] = None,
+    nsfw: bool = False,
+    spoiler: bool = False,
+    flair_id: Optional[str] = None,
+    flair_text: Optional[str] = None,
+    auto_comment: bool = False,
+    original_url: Optional[str] = None,
+    comment_language: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new post in a subreddit."""
         client = self.manager.client
@@ -372,7 +375,7 @@ class RedditService:
         try:
             logger.info(f"Creating post in r/{clean_subreddit}")
             subreddit_obj = await client.subreddit(clean_subreddit)
-            
+
             if video_path:
                 post_url = await self._submit_video_direct(
                     ctx=ctx,
@@ -390,6 +393,7 @@ class RedditService:
 
                 # Try to get the submission object if we have a valid post URL with ID
                 submission = None
+                post_id = None
                 if post_url and "new/" not in post_url:
                     try:
                         post_id = _extract_reddit_id(post_url)
@@ -402,6 +406,18 @@ class RedditService:
                     # Fallback case - post was submitted but we don't have the exact URL
                     logger.info("Video post submitted but exact URL not available, using fallback")
                     final_permalink = f"https://www.reddit.com/r/{clean_subreddit}/new/"
+
+                # Auto-comment logic
+                if auto_comment and original_url and post_id:
+                    try:
+                        comment_text = f"Original TikTok: {original_url}"
+                        # Optionally, add language info if needed
+                        if comment_language:
+                            comment_text += f"\n(Language: {comment_language})"
+                        await self.reply_to_post(ctx, post_id, comment_text, subreddit=clean_subreddit)
+                        logger.info(f"Auto-commented original TikTok link on post {post_id}")
+                    except Exception as comment_error:
+                        logger.error(f"Failed to auto-comment TikTok link: {comment_error}")
 
             elif is_self:
                 submission = await subreddit_obj.submit(
