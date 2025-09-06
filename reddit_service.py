@@ -479,6 +479,7 @@ class RedditService:
 
         clean_subreddit_name = subreddit_name[2:] if subreddit_name.startswith("r/") else subreddit_name
         sub = await client.subreddit(clean_subreddit_name)
+        await sub.load()  # Load subreddit data before accessing attributes
         
         flair_templates = []
         try:
@@ -507,9 +508,9 @@ class RedditService:
 
         return {
             "name": sub.display_name,
-            "title": await sub.title(),
-            "subscribers": await sub.subscribers(),
-            "public_description": await sub.public_description(),
+            "title": sub.title,  # No longer need await after load()
+            "subscribers": sub.subscribers,  # No longer need await after load()
+            "public_description": sub.public_description,  # No longer need await after load()
             "flair": flair_templates,
             "rules": rules,
         }
