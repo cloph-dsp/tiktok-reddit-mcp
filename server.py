@@ -444,7 +444,7 @@ async def _post_downloaded_video_async_impl(
             if subreddit_details is None:
                 raise ValueError("Could not retrieve subreddit details.")
             logger.info(f"Subreddit details retrieved: {subreddit_details}")
-            if not subreddit_details.get("video_post_allowed", False):
+            if not subreddit_details.get("video_posts_allowed", True):
                 raise ValueError(f"Subreddit r/{subreddit_details['name']} does not allow video posts.")
         except Exception as e:
             logger.error(f"Error retrieving subreddit details: {e}")

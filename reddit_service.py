@@ -473,6 +473,10 @@ class RedditService:
 
     async def get_subreddit_details(self, subreddit_name: str) -> Dict[str, Any]:
         """Get detailed information about a single subreddit, including rules and flair."""
+        # Ensure client is initialized
+        if not self.manager.client:
+            await self.manager.initialize_client()
+            
         client = self.manager.client
         if not client:
             raise RuntimeError("Reddit client not initialized")
@@ -499,12 +503,43 @@ class RedditService:
             # We need to call it to get the list of rules.
             subreddit_rules = await sub.rules()
             for rule in subreddit_rules:
-                rules.append({
-                    "short_name": rule.short_name,
-                    "description": rule.description,
-                })
+                if hasattr(rule, 'short_name') and hasattr(rule, 'description'):
+                    # Rule is an object with attributes
+                    rules.append({
+                        "short_name": rule.short_name,
+                        "description": rule.description,
+                    })
+                elif isinstance(rule, str):
+                    # Rule is just a string
+                    rules.append({
+                        "short_name": rule,
+                        "description": rule,
+                    })
+                else:
+                    # Unknown format, convert to string
+                    rules.append({
+                        "short_name": str(rule),
+                        "description": str(rule),
+                    })
         except Exception as e:
             logger.warning(f"Could not fetch rules for r/{clean_subreddit_name}: {e}")
+
+        # Check if video posts are allowed
+        video_allowed = True  # Default to allowed
+        try:
+            # Check various indicators of video posting restrictions
+            # Note: Some subreddits may have restrictions that aren't exposed via API
+            # This is a best-effort check
+            if hasattr(sub, 'allow_videos') and sub.allow_videos is False:
+                video_allowed = False
+            elif hasattr(sub, 'allow_video_gifs') and sub.allow_video_gifs is False:
+                video_allowed = False
+            elif hasattr(sub, 'submission_type') and sub.submission_type in ['text', 'link']:
+                # If only text or link submissions are allowed, videos are not
+                video_allowed = False
+        except Exception as e:
+            logger.warning(f"Could not determine video posting permissions for r/{clean_subreddit_name}: {e}")
+            # Default to allowed if we can't determine
 
         return {
             "name": sub.display_name,
@@ -513,6 +548,7 @@ class RedditService:
             "public_description": sub.public_description,  # No longer need await after load()
             "flair": flair_templates,
             "rules": rules,
+            "video_posts_allowed": video_allowed,
         }
 
     async def suggest_subreddits(
