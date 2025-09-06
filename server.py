@@ -168,7 +168,6 @@ async def create_post(
     spoiler: bool = False,
     flair_id: Optional[str] = None,
     flair_text: Optional[str] = None,
-    original_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new post in a subreddit.
 
@@ -202,7 +201,6 @@ async def create_post(
         spoiler=spoiler,
         flair_id=flair_id,
         flair_text=flair_text,
-        original_url=original_url,
     )
 
 
@@ -600,7 +598,6 @@ async def _post_downloaded_video_async_impl(
             spoiler=spoiler,
             flair_id=flair_id,
             flair_text=flair_text,
-            original_url=original_url,
         )
         report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
         logger.info(f"Post created successfully: {post_info['metadata']['permalink']}")
