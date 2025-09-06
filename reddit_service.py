@@ -345,6 +345,7 @@ class RedditService:
         spoiler: bool = False,
         flair_id: Optional[str] = None,
         flair_text: Optional[str] = None,
+        original_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new post in a subreddit."""
         client = self.manager.client
@@ -374,33 +375,70 @@ class RedditService:
             subreddit_obj = await client.subreddit(clean_subreddit)
             
             if video_path:
-                post_url = await self._submit_video_direct(
-                    ctx=ctx,
-                    subreddit=clean_subreddit,
-                    title=title[:300],
-                    video_path=video_path,
-                    thumbnail_path=thumbnail_path,
-                    nsfw=nsfw,
-                    spoiler=spoiler,
-                    flair_id=flair_id,
-                    flair_text=flair_text,
-                )
-                logger.info(f"Video post successful, URL: {post_url}")
-                await self._report_progress(ctx, {"status": "completed", "message": f"Video submitted successfully: {post_url}"})
+                # Try to submit video first
+                try:
+                    post_url = await self._submit_video_direct(
+                        ctx=ctx,
+                        subreddit=clean_subreddit,
+                        title=title[:300],
+                        video_path=video_path,
+                        thumbnail_path=thumbnail_path,
+                        nsfw=nsfw,
+                        spoiler=spoiler,
+                        flair_id=flair_id,
+                        flair_text=flair_text,
+                    )
+                    logger.info(f"Video post successful, URL: {post_url}")
+                    await self._report_progress(ctx, {"status": "completed", "message": f"Video submitted successfully: {post_url}"})
+                    
+                except Exception as video_error:
+                    # Check if the error is about video posts not being allowed
+                    error_str = str(video_error).lower()
+                    if "does not allow video posts" in error_str or "video" in error_str and ("not allowed" in error_str or "not permitted" in error_str):
+                        logger.warning(f"Video posts not allowed in r/{clean_subreddit}, falling back to link post: {video_error}")
+                        await self._report_progress(ctx, {"status": "posting_video", "message": f"Video posts not allowed in r/{clean_subreddit}, creating link post instead..."})
+                        
+                        # Fall back to link post with original TikTok URL
+                        if not original_url:
+                            logger.error("No original URL available for fallback link post")
+                            raise RuntimeError(f"Subreddit r/{clean_subreddit} does not allow video posts and no original URL provided for fallback")
+                        
+                        # Create link post instead
+                        submission = await subreddit_obj.submit(
+                            title=title[:300], 
+                            url=original_url, 
+                            nsfw=nsfw, 
+                            spoiler=spoiler, 
+                            send_replies=True
+                        )
+                        final_permalink = f"https://reddit.com{submission.permalink}"
+                        logger.info(f"Link post created successfully as fallback: {final_permalink}")
+                        await self._report_progress(ctx, {"status": "completed", "message": f"Link post created: {final_permalink}"})
+                    else:
+                        # Re-raise the original error if it's not about video posts
+                        raise video_error
 
-                # Try to get the submission object if we have a valid post URL with ID
-                submission = None
-                if post_url and "new/" not in post_url:
-                    try:
-                        post_id = _extract_reddit_id(post_url)
-                        submission = await client.submission(id=post_id)
-                        final_permalink = post_url
-                    except Exception as e:
-                        logger.warning(f"Could not fetch submission object: {e}")
-                        final_permalink = post_url
+                # Handle the post URL and submission object for video posts
+                if 'post_url' in locals() and post_url:
+                    # Try to get the submission object if we have a valid post URL with ID
+                    submission = None
+                    if post_url and "new/" not in post_url:
+                        try:
+                            post_id = _extract_reddit_id(post_url)
+                            submission = await client.submission(id=post_id)
+                            final_permalink = post_url
+                        except Exception as e:
+                            logger.warning(f"Could not fetch submission object: {e}")
+                            final_permalink = post_url
+                    else:
+                        # Fallback case - post was submitted but we don't have the exact URL
+                        logger.info("Video post submitted but exact URL not available, using fallback")
+                        final_permalink = f"https://www.reddit.com/r/{clean_subreddit}/new/"
+                elif 'submission' in locals() and submission:
+                    # This is the fallback link post case
+                    final_permalink = f"https://reddit.com{submission.permalink}"
                 else:
-                    # Fallback case - post was submitted but we don't have the exact URL
-                    logger.info("Video post submitted but exact URL not available, using fallback")
+                    # Should not reach here, but fallback just in case
                     final_permalink = f"https://www.reddit.com/r/{clean_subreddit}/new/"
 
             elif is_self:
