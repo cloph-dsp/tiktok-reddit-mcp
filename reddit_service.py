@@ -148,7 +148,7 @@ class RedditService:
         upload_start_time = time.time()
 
         try:
-            reddit = await self.manager.client
+            reddit = self.manager.client
             if not reddit:
                 raise RedditPostError("Reddit client not initialized")
             if self.manager.is_read_only:
@@ -293,7 +293,7 @@ class RedditService:
                     # Fallback: Check user's recent submissions to find the new post
                     logger.info("Attempting to find post via user submissions...")
                     try:
-                        reddit = await self.manager.client
+                        reddit = self.manager.client
                         user = await reddit.user.me()
                         submissions = user.submissions.new(limit=5)
                         
@@ -347,7 +347,7 @@ class RedditService:
         flair_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new post in a subreddit."""
-        client = await self.manager.client
+        client = self.manager.client
         if not client or self.manager.is_read_only:
             raise RuntimeError("Reddit client not initialized or in read-only mode.")
         if not await self.manager.check_user_auth():
@@ -455,7 +455,7 @@ class RedditService:
         self, ctx: Any, post_id: str, content: str, subreddit: Optional[str] = None
     ) -> Dict[str, Any]:
         """Post a reply to an existing Reddit post."""
-        client = await self.manager.client
+        client = self.manager.client
         if not client:
             raise RuntimeError("Reddit client not initialized")
 
@@ -473,7 +473,7 @@ class RedditService:
 
     async def get_subreddit_details(self, subreddit_name: str) -> Dict[str, Any]:
         """Get detailed information about a single subreddit, including rules and flair."""
-        client = await self.manager.client
+        client = self.manager.client
         if not client:
             raise RuntimeError("Reddit client not initialized")
 
@@ -523,7 +523,7 @@ class RedditService:
         post_sort: str = "top",
     ) -> Dict[str, Any]:
         """Suggest relevant subreddits for a topic and show sample post titles."""
-        client = await self.manager.client
+        client = self.manager.client
         if not client:
             raise RuntimeError("Reddit client not initialized")
         # Rest of the implementation
