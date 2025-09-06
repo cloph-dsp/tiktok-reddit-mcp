@@ -499,10 +499,11 @@ class RedditService:
 
         rules = []
         try:
-            # The rules attribute is not an async iterator, it's a relation.
-            # We need to call it to get the list of rules.
-            subreddit_rules = await sub.rules()
-            for rule in subreddit_rules:
+            # Access the rules object
+            subreddit_rules = sub.rules
+            # Get the rule list (this will fetch from API if not cached)
+            rule_list = subreddit_rules._rule_list
+            for rule in rule_list:
                 if hasattr(rule, 'short_name') and hasattr(rule, 'description'):
                     # Rule is an object with attributes
                     rules.append({
