@@ -61,16 +61,28 @@ def require_write_access(func: F) -> F:
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         reddit_manager = RedditClientManager()
+        
+        # Always try to ensure we have a valid authenticated client
+        if not reddit_manager.client or reddit_manager.is_read_only:
+            logger.info("require_write_access: Client not ready, initializing...")
+            await reddit_manager.initialize_client()
+            
         if reddit_manager.is_read_only:
+            logger.error("require_write_access: Reddit client is in read-only mode after initialization")
             raise ValueError(
-                "Write operation not allowed in read-only mode. Please provide valid credentials."
+                "Write operation not allowed in read-only mode. Please check your Reddit credentials."
             )
-        if not reddit_manager.check_user_auth():
+        
+        # Double-check authentication
+        auth_check = await reddit_manager.check_user_auth()
+        if not auth_check:
+            logger.error("require_write_access: User authentication check failed")
             raise Exception(
                 "Authentication required for write operations. "
                 "Please provide valid REDDIT_USERNAME and REDDIT_PASSWORD environment variables."
             )
-        logger.info(f"require_write_access: Calling {func.__name__} with args={args}, kwargs={kwargs}")
+        
+        logger.info(f"require_write_access: Authentication successful, calling {func.__name__}")
         
         # Call the function and handle both sync and async functions properly
         if asyncio.iscoroutinefunction(func):
@@ -78,7 +90,8 @@ def require_write_access(func: F) -> F:
         else:
             result = func(*args, **kwargs)
             
-        logger.info(f"require_write_access: {func.__name__} returned {result}")
+        logger.info(f"require_write_access: {func.__name__} completed successfully")
+        return result
         return result
 
     return cast(F, wrapper)
