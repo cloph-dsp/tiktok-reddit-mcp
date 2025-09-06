@@ -614,6 +614,9 @@ async def _post_downloaded_video_async_impl(
             spoiler=spoiler,
             flair_id=flair_id,
             flair_text=flair_text,
+            auto_comment=auto_comment,
+            original_url=original_url,
+            comment_language=comment_language,
         )
         report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
         logger.info(f"Post created successfully: {post_info['metadata']['permalink']}")

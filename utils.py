@@ -1,3 +1,8 @@
+def sanitize_tiktok_url(url: str) -> str:
+    """Remove query parameters from TikTok URLs."""
+    from urllib.parse import urlparse, urlunparse
+    parsed_url = urlparse(url)
+    return urlunparse(parsed_url._replace(query=""))
 import logging
 from datetime import datetime
 from typing import Any, Optional

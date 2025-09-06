@@ -147,8 +147,8 @@ class VideoService:
             makedirs(download_folder)
 
         # Sanitize the URL: remove query parameters
-        parsed_url = urlparse(url)
-        url = urlunparse(parsed_url._replace(query=""))
+        from utils import sanitize_tiktok_url
+        url = sanitize_tiktok_url(url)
         logger.info(f"Sanitized TikTok URL to: {url}")
 
         # Test network connectivity before attempting download
