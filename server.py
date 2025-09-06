@@ -170,6 +170,9 @@ async def create_post(
     spoiler: bool = False,
     flair_id: Optional[str] = None,
     flair_text: Optional[str] = None,
+    auto_comment: bool = True,
+    original_url: Optional[str] = None,
+    comment_language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new post in a subreddit.
 
@@ -183,6 +186,9 @@ async def create_post(
         thumbnail_path: Path to a thumbnail for the video.
         nsfw: Whether the submission should be marked NSFW (default: False).
         spoiler: Whether the submission should be marked as a spoiler (default: False).
+        auto_comment: Whether to automatically comment with the original URL (default: True).
+        original_url: Original URL to include in auto-comment.
+        comment_language: Language for auto-comment ('en', 'pt', or 'both').
 
     Returns:
         Dictionary containing information about the created post
@@ -203,6 +209,9 @@ async def create_post(
         spoiler=spoiler,
         flair_id=flair_id,
         flair_text=flair_text,
+        auto_comment=auto_comment,
+        original_url=original_url,
+        comment_language=comment_language,
     )
 
 

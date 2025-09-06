@@ -345,7 +345,7 @@ class RedditService:
     spoiler: bool = False,
     flair_id: Optional[str] = None,
     flair_text: Optional[str] = None,
-    auto_comment: bool = False,
+    auto_comment: bool = True,
     original_url: Optional[str] = None,
     comment_language: Optional[str] = None,
     ) -> Dict[str, Any]:
