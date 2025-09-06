@@ -256,11 +256,19 @@ class VideoService:
         original_url = url
         if any(host in url for host in ("vm.tiktok.com", "vt.tiktok.com")):
             try:
+                # Try to resolve short URL, but if it fails, use the sanitized short URL directly
                 head = requests.head(url, allow_redirects=True, timeout=10)
                 head.raise_for_status()
-                url = head.url
+                resolved_url = head.url
+                # Sanitize the resolved URL
+                resolved_url = sanitize_tiktok_url(resolved_url)
+                url = resolved_url
+                logger.info(f"Resolved and sanitized TikTok URL to: {url}")
             except Exception as e:
-                raise RuntimeError(f"Failed to resolve short TikTok link: {e}") from e
+                # If resolution fails, use the sanitized short URL directly
+                logger.warning(f"Failed to resolve short TikTok link: {e}")
+                logger.info("Using sanitized short URL directly with yt-dlp")
+                # url is already sanitized at the beginning, so we can use it as-is
 
         # Check if video already exists locally
         try:

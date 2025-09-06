@@ -410,7 +410,10 @@ class RedditService:
                 # Auto-comment logic
                 if auto_comment and original_url and post_id:
                     try:
-                        comment_text = f"Original TikTok: {original_url}"
+                        # Sanitize the original URL for the comment
+                        from utils import sanitize_tiktok_url
+                        clean_original_url = sanitize_tiktok_url(original_url)
+                        comment_text = f"Original TikTok: {clean_original_url}"
                         # Optionally, add language info if needed
                         if comment_language:
                             comment_text += f"\n(Language: {comment_language})"
