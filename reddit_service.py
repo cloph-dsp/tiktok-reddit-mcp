@@ -410,6 +410,7 @@ class RedditService:
                 # Auto-comment logic
                 if auto_comment and original_url and post_id:
                     try:
+                        logger.info(f"[Auto-comment] Attempt 1 for post_id={post_id}, subreddit={clean_subreddit}")
                         # Wait briefly to ensure Reddit has processed the new submission
                         await asyncio.sleep(5)
                         # Sanitize the original URL and parse creator username
@@ -442,10 +443,13 @@ class RedditService:
                                 lines.append(f"Original TikTok: {clean_original_url}")
                                 lines.append(f"Link original: {clean_original_url}")
                             comment_text = "\n".join(lines)
-                        await self.reply_to_post(ctx, post_id, comment_text, subreddit=clean_subreddit)
-                        logger.info(f"Auto-commented original TikTok link on post {post_id}")
+                        logger.info(f"[Auto-comment] Posting comment: '{comment_text}'")
+                        reply_result = await self.reply_to_post(ctx, post_id, comment_text, subreddit=clean_subreddit)
+                        logger.info(f"[Auto-comment] Success: {reply_result}")
+                        return reply_result
                     except Exception as comment_error:
-                        logger.error(f"Failed to auto-comment TikTok link: {comment_error}")
+                        logger.error(f"[Auto-comment] Failed for post_id={post_id}: {comment_error}", exc_info=True)
+                        raise RedditPostError(f"Auto-comment failed: {comment_error}")
 
             elif is_self:
                 submission = await subreddit_obj.submit(
