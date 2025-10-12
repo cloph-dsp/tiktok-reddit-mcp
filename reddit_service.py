@@ -360,6 +360,8 @@ class RedditService:
         
         delete_temp_thumb = False
         temp_thumbnail_path = None
+        comment_info = None  # Initialize to track auto-comment result
+        
         if video_path and not thumbnail_path:
             temp_thumbnail_path = path.join(path.dirname(video_path), f"thumb_{path.basename(video_path)}.jpg")
             try:
@@ -407,12 +409,19 @@ class RedditService:
                     logger.info("Video post submitted but exact URL not available, using fallback")
                     final_permalink = f"https://www.reddit.com/r/{clean_subreddit}/new/"
 
-                # Auto-comment logic
+                # Auto-comment logic - don't block the main return
+                comment_info = None
                 if auto_comment and original_url and post_id:
                     try:
-                        logger.info(f"[Auto-comment] Attempt 1 for post_id={post_id}, subreddit={clean_subreddit}")
-                        # Wait briefly to ensure Reddit has processed the new submission
-                        await asyncio.sleep(5)
+                        logger.info(f"[Auto-comment] Preparing comment for post_id={post_id}, subreddit={clean_subreddit}")
+                        # Wait longer to ensure Reddit has fully processed the new submission
+                        await asyncio.sleep(10)
+                        
+                        # Fetch fresh submission to ensure it's available
+                        logger.info(f"[Auto-comment] Fetching fresh submission object for post_id={post_id}")
+                        submission = await client.submission(id=post_id)
+                        await submission.load()
+                        
                         # Sanitize the original URL and parse creator username
                         from utils import sanitize_tiktok_url
                         from urllib.parse import urlparse
@@ -444,12 +453,19 @@ class RedditService:
                                 lines.append(f"Link original: {clean_original_url}")
                             comment_text = "\n".join(lines)
                         logger.info(f"[Auto-comment] Posting comment: '{comment_text}'")
-                        reply_result = await self.reply_to_post(ctx, post_id, comment_text, subreddit=clean_subreddit)
-                        logger.info(f"[Auto-comment] Success: {reply_result}")
-                        return reply_result
+                        
+                        # Use submission.reply instead of reply_to_post to avoid extra lookups
+                        reply = await submission.reply(comment_text)
+                        comment_info = {
+                            "reply_id": reply.id,
+                            "reply_permalink": f"https://reddit.com{reply.permalink}",
+                            "comment_text": comment_text,
+                        }
+                        logger.info(f"[Auto-comment] Success: {comment_info}")
                     except Exception as comment_error:
                         logger.error(f"[Auto-comment] Failed for post_id={post_id}: {comment_error}", exc_info=True)
-                        raise RedditPostError(f"Auto-comment failed: {comment_error}")
+                        # Don't raise - allow the post to succeed even if comment fails
+                        comment_info = {"error": str(comment_error)}
 
             elif is_self:
                 submission = await subreddit_obj.submit(
@@ -476,15 +492,21 @@ class RedditService:
                     logger.warning(f"Failed to apply flair to post {submission.id}: {flair_error}")
 
             logger.info(f"Post created successfully: {final_permalink}")
-            return {
+            result = {
                 "post": _format_post(submission) if submission else "Video post created (submission object not available)",
                 "metadata": {
                     "created_at": _format_timestamp(time.time()),
                     "subreddit": clean_subreddit,
                     "permalink": final_permalink,
-                    "id": submission.id if submission else "unknown",
+                    "id": submission.id if submission else post_id if post_id else "unknown",
                 },
             }
+            
+            # Add comment info if available
+            if comment_info:
+                result["auto_comment"] = comment_info
+            
+            return result
 
         except Exception as e:
             logger.error(f"Failed to create post in r/{clean_subreddit}: {e}", exc_info=True)
