@@ -399,10 +399,12 @@ class RedditService:
                 if post_url and "new/" not in post_url:
                     try:
                         post_id = _extract_reddit_id(post_url)
+                        logger.info(f"Extracted post_id: {post_id} from URL: {post_url}")
                         submission = await client.submission(id=post_id)
+                        logger.info(f"Successfully fetched submission object for post_id: {post_id}")
                         final_permalink = post_url
                     except Exception as e:
-                        logger.warning(f"Could not fetch submission object: {e}")
+                        logger.warning(f"Could not fetch submission object for post_id={post_id}: {e}")
                         final_permalink = post_url
                 else:
                     # Fallback case - post was submitted but we don't have the exact URL
@@ -410,11 +412,13 @@ class RedditService:
                     final_permalink = f"https://www.reddit.com/r/{clean_subreddit}/new/"
 
                 # Auto-comment logic - don't block the main return
-                comment_info = None
                 if auto_comment and original_url and post_id:
                     try:
-                        logger.info(f"[Auto-comment] Preparing comment for post_id={post_id}, subreddit={clean_subreddit}")
+                        logger.info(f"[Auto-comment] Starting auto-comment process for post_id={post_id}, subreddit={clean_subreddit}")
+                        logger.info(f"[Auto-comment] original_url={original_url}, comment_language={comment_language}")
+                        
                         # Wait longer to ensure Reddit has fully processed the new submission
+                        logger.info(f"[Auto-comment] Waiting 10 seconds for Reddit to process the submission...")
                         await asyncio.sleep(10)
                         
                         # Fetch fresh submission to ensure it's available
@@ -466,6 +470,16 @@ class RedditService:
                         logger.error(f"[Auto-comment] Failed for post_id={post_id}: {comment_error}", exc_info=True)
                         # Don't raise - allow the post to succeed even if comment fails
                         comment_info = {"error": str(comment_error)}
+                else:
+                    # Log why auto-comment was skipped
+                    if not auto_comment:
+                        logger.info("[Auto-comment] Skipped: auto_comment is False")
+                    elif not original_url:
+                        logger.info("[Auto-comment] Skipped: original_url is missing")
+                    elif not post_id:
+                        logger.info("[Auto-comment] Skipped: post_id is missing")
+                    else:
+                        logger.warning("[Auto-comment] Skipped: Unknown reason")
 
             elif is_self:
                 submission = await subreddit_obj.submit(
