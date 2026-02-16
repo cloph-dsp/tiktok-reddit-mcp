@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import time
 import sys
@@ -7,6 +8,7 @@ import json
 from datetime import datetime
 from os import getenv, path, remove
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 import praw
 import requests
 import websockets
@@ -16,6 +18,7 @@ from utils import (
     _format_post,
     _extract_reddit_id,
     _find_submission_by_title,
+    sanitize_tiktok_url,
 )
 from reddit_client import RedditClientManager
 from exceptions import RedditPostError
@@ -57,6 +60,96 @@ class RedditService:
 
     def __init__(self):
         self.manager = RedditClientManager()
+
+    async def _maybe_await(self, value: Any) -> Any:
+        """Await objects that are awaitable and return plain values as-is."""
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    def _extract_submission_id_from_url(self, post_url: str) -> Optional[str]:
+        """Extract submission ID from a Reddit permalink URL."""
+        try:
+            parsed = urlparse(post_url)
+            parts = [p for p in parsed.path.split("/") if p]
+            if "comments" in parts:
+                comments_index = parts.index("comments")
+                if comments_index + 1 < len(parts):
+                    return parts[comments_index + 1]
+        except Exception:
+            pass
+        return None
+
+    def _normalize_title(self, title: str) -> str:
+        return " ".join((title or "").lower().split())
+
+    def _build_auto_comment_text(self, original_url: str, comment_language: Optional[str]) -> str:
+        """Build the auto-comment text for original TikTok attribution."""
+        clean_original_url = sanitize_tiktok_url(original_url)
+        parsed = urlparse(clean_original_url)
+        parts = parsed.path.strip('/').split('/')
+        creator = parts[0] if parts and parts[0].startswith('@') else None
+
+        lang = (comment_language or '').lower().strip()
+        if lang in ('en', 'english', 'eng'):
+            return f"Original TikTok by {creator}: {clean_original_url}" if creator else f"Original TikTok: {clean_original_url}"
+        if lang in ('pt', 'portuguese', 'pt-br'):
+            return f"TikTok original de {creator}: {clean_original_url}" if creator else f"Link original: {clean_original_url}"
+
+        if creator:
+            return f"Original TikTok by {creator}: {clean_original_url}\nTikTok original de {creator}: {clean_original_url}"
+        return f"Original TikTok: {clean_original_url}\nLink original: {clean_original_url}"
+
+    async def _find_recent_submission_by_title(
+        self,
+        subreddit_obj: Any,
+        title: str,
+        max_age_seconds: int = 900,
+        limit: int = 50,
+    ) -> Optional[Any]:
+        """Find a recent submission by exact normalized title."""
+        search_time = time.time() - max_age_seconds
+        target = self._normalize_title(title)
+        async for submission in subreddit_obj.new(limit=limit):
+            if getattr(submission, "created_utc", 0) < search_time:
+                continue
+            if self._normalize_title(getattr(submission, "title", "")) == target:
+                return submission
+        return None
+
+    async def _find_recent_duplicate(
+        self,
+        subreddit_obj: Any,
+        title: str,
+        original_url: Optional[str],
+        limit: int = 50,
+    ) -> Optional[Dict[str, str]]:
+        """Check latest posts for likely duplicates by title or original URL."""
+        normalized_title = self._normalize_title(title)
+        normalized_original_url = sanitize_tiktok_url(original_url) if original_url else None
+
+        async for submission in subreddit_obj.new(limit=limit):
+            existing_title = getattr(submission, "title", "")
+            if self._normalize_title(existing_title) == normalized_title:
+                return {
+                    "reason": "title_match",
+                    "id": submission.id,
+                    "permalink": f"https://reddit.com{submission.permalink}",
+                    "title": existing_title,
+                }
+
+            if normalized_original_url:
+                submission_url = sanitize_tiktok_url(getattr(submission, "url", ""))
+                selftext = getattr(submission, "selftext", "") or ""
+                if submission_url == normalized_original_url or normalized_original_url in selftext:
+                    return {
+                        "reason": "original_url_match",
+                        "id": submission.id,
+                        "permalink": f"https://reddit.com{submission.permalink}",
+                        "title": existing_title,
+                    }
+
+        return None
 
     async def _listen_for_post_url(self, websocket_url: str, timeout: int = 180) -> str:
         """Listen on a websocket for the post URL from Reddit."""
@@ -348,6 +441,7 @@ class RedditService:
     auto_comment: bool = True,
     original_url: Optional[str] = None,
     comment_language: Optional[str] = None,
+    comment_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new post in a subreddit."""
         client = self.manager.client
@@ -374,9 +468,21 @@ class RedditService:
                 thumbnail_path = None
         
         submission = None
+        post_id: Optional[str] = None
         try:
             logger.info(f"Creating post in r/{clean_subreddit}")
-            subreddit_obj = await client.subreddit(clean_subreddit)
+            subreddit_obj = await self._maybe_await(client.subreddit(clean_subreddit))
+
+            duplicate = await self._find_recent_duplicate(
+                subreddit_obj=subreddit_obj,
+                title=title[:300],
+                original_url=original_url,
+                limit=50,
+            )
+            if duplicate:
+                raise RedditPostError(
+                    f"Duplicate detected in r/{clean_subreddit} ({duplicate['reason']}): {duplicate['permalink']}"
+                )
 
             if video_path:
                 post_url = await self._submit_video_direct(
@@ -395,12 +501,11 @@ class RedditService:
 
                 # Try to get the submission object if we have a valid post URL with ID
                 submission = None
-                post_id = None
                 if post_url and "new/" not in post_url:
                     try:
-                        post_id = _extract_reddit_id(post_url)
+                        post_id = self._extract_submission_id_from_url(post_url) or _extract_reddit_id(post_url)
                         logger.info(f"Extracted post_id: {post_id} from URL: {post_url}")
-                        submission = await client.submission(id=post_id)
+                        submission = await self._maybe_await(client.submission(id=post_id))
                         logger.info(f"Successfully fetched submission object for post_id: {post_id}")
                         final_permalink = post_url
                     except Exception as e:
@@ -411,61 +516,51 @@ class RedditService:
                     logger.info("Video post submitted but exact URL not available, using fallback")
                     final_permalink = f"https://www.reddit.com/r/{clean_subreddit}/new/"
 
+                if not post_id:
+                    found_submission = await self._find_recent_submission_by_title(
+                        subreddit_obj=subreddit_obj,
+                        title=title[:300],
+                        max_age_seconds=1200,
+                        limit=50,
+                    )
+                    if found_submission:
+                        submission = found_submission
+                        post_id = submission.id
+                        final_permalink = f"https://reddit.com{submission.permalink}"
+                        logger.info(f"Recovered submission after upload: post_id={post_id}, permalink={final_permalink}")
+
                 # Auto-comment logic - don't block the main return
-                if auto_comment and original_url and post_id:
+                if auto_comment and (original_url or comment_text) and post_id:
                     try:
                         logger.info(f"[Auto-comment] Starting auto-comment process for post_id={post_id}, subreddit={clean_subreddit}")
                         logger.info(f"[Auto-comment] original_url={original_url}, comment_language={comment_language}")
-                        
-                        # Wait longer to ensure Reddit has fully processed the new submission
-                        logger.info(f"[Auto-comment] Waiting 10 seconds for Reddit to process the submission...")
-                        await asyncio.sleep(10)
-                        
-                        # Fetch fresh submission to ensure it's available
-                        logger.info(f"[Auto-comment] Fetching fresh submission object for post_id={post_id}")
-                        submission = await client.submission(id=post_id)
-                        await submission.load()
-                        
-                        # Sanitize the original URL and parse creator username
-                        from utils import sanitize_tiktok_url
-                        from urllib.parse import urlparse
-                        clean_original_url = sanitize_tiktok_url(original_url)
-                        # Extract creator from path (e.g., '/@user/video/...')
-                        parsed = urlparse(clean_original_url)
-                        parts = parsed.path.strip('/').split('/')
-                        creator = parts[0] if parts and parts[0].startswith('@') else None
-                        # Build comment text based on language
-                        lang = (comment_language or '').lower().strip()
-                        if lang in ('en', 'english', 'eng'):
-                            if creator:
-                                comment_text = f"Original TikTok by {creator}: {clean_original_url}"
-                            else:
-                                comment_text = f"Original TikTok: {clean_original_url}"
-                        elif lang in ('pt', 'portuguese', 'pt-br'):
-                            if creator:
-                                comment_text = f"TikTok original de {creator}: {clean_original_url}"
-                            else:
-                                comment_text = f"Link original: {clean_original_url}"
-                        else:
-                            # both
-                            lines = []
-                            if creator:
-                                lines.append(f"Original TikTok by {creator}: {clean_original_url}")
-                                lines.append(f"TikTok original de {creator}: {clean_original_url}")
-                            else:
-                                lines.append(f"Original TikTok: {clean_original_url}")
-                                lines.append(f"Link original: {clean_original_url}")
-                            comment_text = "\n".join(lines)
-                        logger.info(f"[Auto-comment] Posting comment: '{comment_text}'")
-                        
-                        # Use submission.reply instead of reply_to_post to avoid extra lookups
-                        reply = await submission.reply(comment_text)
-                        comment_info = {
-                            "reply_id": reply.id,
-                            "reply_permalink": f"https://reddit.com{reply.permalink}",
-                            "comment_text": comment_text,
-                        }
-                        logger.info(f"[Auto-comment] Success: {comment_info}")
+                        final_comment_text = comment_text or self._build_auto_comment_text(original_url or "", comment_language)
+                        retry_delays = [3, 6, 10]
+                        last_comment_error: Optional[Exception] = None
+
+                        for attempt, delay in enumerate(retry_delays, start=1):
+                            try:
+                                logger.info(f"[Auto-comment] Attempt {attempt}/{len(retry_delays)}")
+                                submission = await self._maybe_await(client.submission(id=post_id))
+                                await submission.load()
+                                reply = await submission.reply(final_comment_text)
+                                comment_info = {
+                                    "reply_id": reply.id,
+                                    "reply_permalink": f"https://reddit.com{reply.permalink}",
+                                    "comment_text": final_comment_text,
+                                }
+                                logger.info(f"[Auto-comment] Success: {comment_info}")
+                                break
+                            except Exception as attempt_error:
+                                last_comment_error = attempt_error
+                                logger.warning(
+                                    f"[Auto-comment] Attempt {attempt} failed for post_id={post_id}: {attempt_error}"
+                                )
+                                if attempt < len(retry_delays):
+                                    await asyncio.sleep(delay)
+
+                        if not comment_info and last_comment_error:
+                            raise last_comment_error
                     except Exception as comment_error:
                         logger.error(f"[Auto-comment] Failed for post_id={post_id}: {comment_error}", exc_info=True)
                         # Don't raise - allow the post to succeed even if comment fails
@@ -493,6 +588,8 @@ class RedditService:
                     title=title[:300], url=content, nsfw=nsfw, spoiler=spoiler, send_replies=True
                 )
                 final_permalink = f"https://reddit.com{submission.permalink}"
+            if submission and not post_id:
+                post_id = submission.id
 
             if submission and (flair_id or flair_text):
                 try:
@@ -546,7 +643,7 @@ class RedditService:
         clean_post_id = _extract_reddit_id(post_id)
         logger.info(f"Creating reply to post ID: {clean_post_id}")
         
-        submission = await client.submission(id=clean_post_id)
+        submission = await self._maybe_await(client.submission(id=clean_post_id))
         reply = await submission.reply(content)
         
         return {
@@ -566,7 +663,7 @@ class RedditService:
             raise RuntimeError("Reddit client not initialized")
 
         clean_subreddit_name = subreddit_name[2:] if subreddit_name.startswith("r/") else subreddit_name
-        sub = await client.subreddit(clean_subreddit_name)
+        sub = await self._maybe_await(client.subreddit(clean_subreddit_name))
         await sub.load()  # Load subreddit data before accessing attributes
         
         flair_templates = []

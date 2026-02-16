@@ -93,7 +93,6 @@ def require_write_access(func: F) -> F:
             
         logger.info(f"require_write_access: {func.__name__} completed successfully")
         return result
-        return result
 
     return cast(F, wrapper)
 
@@ -173,8 +172,12 @@ async def create_post(
     auto_comment: bool = True,
     original_url: Optional[str] = None,
     comment_language: Optional[str] = None,
+    comment_text: Optional[str] = None,
+    human_approved: bool = False,
 ) -> Dict[str, Any]:
-    """Create a new post in a subreddit.
+    """Low-level post creation tool.
+
+    This tool performs posting. Human approval is required before calling it.
 
     Args:
         ctx: Context object for reporting progress.
@@ -189,6 +192,8 @@ async def create_post(
         auto_comment: Whether to automatically comment with the original URL (default: True).
         original_url: Original URL to include in auto-comment.
         comment_language: Language for auto-comment ('en', 'pt', or 'both').
+        comment_text: Optional explicit comment text; if provided, this is used verbatim.
+        human_approved: Must be True after explicit human review/approval.
 
     Returns:
         Dictionary containing information about the created post
@@ -197,6 +202,12 @@ async def create_post(
         ValueError: If input validation fails
         RuntimeError: For other errors during post creation
     """
+    if not human_approved:
+        raise ValueError(
+            "Posting blocked: human_approved=False. "
+            "Obtain explicit human approval, then call create_post with human_approved=True."
+        )
+
     return await reddit_service.create_post(
         ctx=ctx,
         subreddit=subreddit,
@@ -212,6 +223,7 @@ async def create_post(
         auto_comment=auto_comment,
         original_url=original_url,
         comment_language=comment_language,
+        comment_text=comment_text,
     )
 
 
@@ -263,6 +275,64 @@ async def download_tiktok_video(ctx: Any, url: str, download_folder: str = "down
     )
 
 @mcp.tool()
+async def prepare_tiktok_for_reddit(
+    ctx: Any,
+    tiktok_url: str,
+    subreddit: str,
+    original_url: Optional[str] = None,
+    include_transcription: bool = True,
+    transcription_model_size: str = "small",
+    comment_language: str = "both",
+    download_folder: str = "downloaded",
+) -> Dict[str, Any]:
+    """Prepare a TikTok post package without posting to Reddit.
+
+    This is phase 1 for agents: download, optional transcription, and subreddit validation.
+    Phase 2 is posting via `post_downloaded_video` or `create_post` with `human_approved=True`.
+    """
+    download_result = await video_service.download_tiktok_video(
+        ctx=ctx,
+        url=tiktok_url,
+        download_folder=download_folder,
+        keep=True,
+    )
+    video_path = download_result.get("video_path")
+    source_url = original_url or download_result.get("resolved_url") or tiktok_url
+
+    subreddit_details = await reddit_service.get_subreddit_details(subreddit)
+    subreddit_info = subreddit_details.get("subreddit", {})
+    if not subreddit_info.get("video_posts_allowed", True):
+        raise ValueError(f"Subreddit r/{subreddit_info.get('name', subreddit)} does not allow video posts.")
+
+    transcription_result: Optional[Dict[str, Any]] = None
+    if include_transcription and video_path:
+        transcription_result = await transcription_service.transcribe_video(
+            ctx=ctx,
+            video_path=video_path,
+            model_size=transcription_model_size,
+        )
+
+    return {
+        "phase": "prepared_not_posted",
+        "approval_required_for_posting": True,
+        "prepared_inputs": {
+            "video_path": video_path,
+            "video_id": download_result.get("video_id"),
+            "download_folder": download_folder,
+            "subreddit": subreddit,
+            "original_url": source_url,
+            "comment_language": comment_language,
+        },
+        "download": download_result,
+        "subreddit": subreddit_details,
+        "transcription": transcription_result,
+        "next_step": (
+            "After human approval, call post_downloaded_video with "
+            "human_approved=True and the prepared video_path/subreddit/title."
+        ),
+    }
+
+@mcp.tool()
 async def transcribe_video(ctx: Any, video_path: str, model_size: str = "small") -> Dict[str, Any]:
     """Transcribe a downloaded video using faster-whisper if enabled.
 
@@ -310,8 +380,14 @@ async def post_downloaded_video(
     auto_comment: bool = True,
     video_id: Optional[str] = None,
     download_folder: str = "downloaded",
+    human_approved: bool = False,
 ) -> Dict[str, Any]:
     """Post a previously downloaded video to Reddit, then auto-delete video & thumbnail.
+
+    This is phase 2 (posting). Human approval is required before calling.
+    Preferred sequence:
+    1) `prepare_tiktok_for_reddit` for non-posting preparation.
+    2) `post_downloaded_video` only after approval, with `human_approved=True`.
 
     You can supply either:
       - video_path (full path), OR
@@ -324,6 +400,12 @@ async def post_downloaded_video(
       pt   -> "Link original: <url>"
       both -> "Original link / link original: <url>"
     """
+    if not human_approved:
+        raise ValueError(
+            "Posting blocked: human_approved=False. "
+            "Obtain explicit human approval, then call post_downloaded_video with human_approved=True."
+        )
+
     logger.info(f"post_downloaded_video called with video_path={video_path}, subreddit={subreddit}, title={title}")
     try:
         result = await _post_downloaded_video_async(
@@ -341,7 +423,8 @@ async def post_downloaded_video(
             comment_language=comment_language,
             auto_comment=auto_comment,
             video_id=video_id,
-            download_folder=download_folder
+            download_folder=download_folder,
+            human_approved=human_approved,
         )
         logger.info(f"post_downloaded_video result: {result}")
         return result
@@ -368,14 +451,15 @@ async def _post_downloaded_video_async(
     comment_language: str,
     auto_comment: bool,
     video_id: Optional[str],
-    download_folder: str
+    download_folder: str,
+    human_approved: bool,
 ) -> Dict[str, Any]:
     """Helper function to run the async part of post_downloaded_video."""
     logger.info(f"_post_downloaded_video_async called with video_path={video_path}, subreddit={subreddit}, title={title}")
     return await _post_downloaded_video_async_impl(
         ctx, video_path, subreddit, title, thumbnail_path, nsfw, spoiler,
         flair_id, flair_text, comment, original_url, comment_language,
-        auto_comment, video_id, download_folder
+        auto_comment, video_id, download_folder, human_approved
     )
 
 async def _post_downloaded_video_async_impl(
@@ -394,7 +478,8 @@ async def _post_downloaded_video_async_impl(
     comment_language: str,
     auto_comment: bool,
     video_id: Optional[str],
-    download_folder: str
+    download_folder: str,
+    human_approved: bool,
 ) -> Dict[str, Any]:
     """Implementation of the async part of post_downloaded_video with timeout protection."""
     logger.info(f"_post_downloaded_video_async_impl started at {time.time()}")
@@ -626,6 +711,8 @@ async def _post_downloaded_video_async_impl(
             auto_comment=auto_comment,
             original_url=original_url,
             comment_language=comment_language,
+            comment_text=comment,
+            human_approved=human_approved,
         )
         report_progress({"status": "posting_video", "message": f"Post created: {post_info['metadata']['permalink']}"})
         logger.info(f"Post created successfully: {post_info['metadata']['permalink']}")

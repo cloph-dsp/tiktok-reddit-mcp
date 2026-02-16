@@ -5,6 +5,7 @@ import time
 import sys
 import subprocess
 import json
+import shutil
 from os import getenv, makedirs, path, remove
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
@@ -22,12 +23,20 @@ logger = logging.getLogger(__name__)
 class VideoService:
     """Encapsulates video download and processing logic."""
 
+    def __init__(self) -> None:
+        self._ffmpeg_paths_cache: Optional[tuple[str, str]] = None
+        self._last_network_test_at: float = 0.0
+        self._network_test_cooldown_seconds = 300
+
     def _get_ffmpeg_paths(self) -> tuple[str, str]:
         """Get the full paths to ffmpeg and ffprobe executables.
 
         Returns:
             Tuple of (ffmpeg_path, ffprobe_path)
         """
+        if self._ffmpeg_paths_cache:
+            return self._ffmpeg_paths_cache
+
         system = platform.system().lower()
         logger.info(f"Detecting FFmpeg paths for system: {system}")
 
@@ -121,15 +130,16 @@ class VideoService:
 
         # Default fallbacks if not found
         if not ffmpeg_path:
-            ffmpeg_path = "ffmpeg"
-            logger.warning("FFmpeg not found in standard locations, using PATH: ffmpeg")
+            ffmpeg_path = shutil.which("ffmpeg.exe" if system == "windows" else "ffmpeg") or "ffmpeg"
+            logger.warning("FFmpeg not found in standard locations, using PATH fallback: %s", ffmpeg_path)
         if not ffprobe_path:
-            ffprobe_path = "ffprobe"
-            logger.warning("FFprobe not found in standard locations, using PATH: ffprobe")
+            ffprobe_path = shutil.which("ffprobe.exe" if system == "windows" else "ffprobe") or "ffprobe"
+            logger.warning("FFprobe not found in standard locations, using PATH fallback: %s", ffprobe_path)
 
         logger.info(f"Final FFmpeg configuration - FFmpeg: {ffmpeg_path}, FFprobe: {ffprobe_path}")
 
-        return ffmpeg_path, ffprobe_path
+        self._ffmpeg_paths_cache = (ffmpeg_path, ffprobe_path)
+        return self._ffmpeg_paths_cache
 
     async def download_tiktok_video(self, ctx: Any, url: str, download_folder: str = "downloaded", keep: bool = True) -> Dict[str, Any]:
         """Download a TikTok video using yt-dlp (thumbnail discarded immediately).
@@ -151,28 +161,17 @@ class VideoService:
         url = sanitize_tiktok_url(url)
         logger.info(f"Sanitized TikTok URL to: {url}")
 
-        # Test network connectivity before attempting download
-        try:
-            # Run network test in a separate thread to avoid event loop issues
-            await asyncio.get_event_loop().run_in_executor(None, self._test_network_connectivity_sync)
-        except Exception as net_error:
-            logger.warning(f"Network connectivity test failed: {net_error}")
-            logger.warning("Continuing with download attempt despite network test failure...")
-            # Don't fail the entire operation due to network test issues
-
-        # Check and update yt-dlp to latest version
-        try:
-            import subprocess
-            import sys
-            logger.info("Checking for yt-dlp updates...")
-            result = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
-                                    capture_output=True, text=True, timeout=60)
-            if result.returncode == 0:
-                logger.info("yt-dlp is up to date")
-            else:
-                logger.warning(f"Failed to update yt-dlp: {result.stderr}")
-        except Exception as e:
-            logger.warning(f"Error checking for yt-dlp updates: {e}")
+        # Test network connectivity with cooldown to avoid repeated resource-heavy checks.
+        now = time.time()
+        if now - self._last_network_test_at >= self._network_test_cooldown_seconds:
+            try:
+                await asyncio.to_thread(self._test_network_connectivity_sync)
+                self._last_network_test_at = now
+            except Exception as net_error:
+                logger.warning(f"Network connectivity test failed: {net_error}")
+                logger.warning("Continuing with download attempt despite network test failure...")
+        else:
+            logger.info("Skipping network connectivity test (cooldown active)")
 
         # Check if ctx has the report_progress attribute
         if hasattr(ctx, 'report_progress'):
